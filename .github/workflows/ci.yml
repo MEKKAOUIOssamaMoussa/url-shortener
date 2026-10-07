@@ -42,14 +42,20 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image: ${{ steps.image-info.outputs.image }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
 
-      - name: Set image name in environment
+      - name: Set image name in environment and output
+        id: image-info
         run: |
           OWNER_LOWER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "IMAGE=ghcr.io/${OWNER_LOWER}/url-shortener-backend" >> "$GITHUB_ENV"
+          IMAGE="ghcr.io/${OWNER_LOWER}/url-shortener-backend"
+          IMAGE_TAG_SHA="${IMAGE}:${{ github.sha }}"
+          echo "IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+          echo "image=${IMAGE_TAG_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -70,3 +76,82 @@ jobs:
         run: |
           docker push "$IMAGE:${{ github.sha }}"
           docker push "$IMAGE:latest"
+
+  deploy:
+    name: Deploy to Azure Container Apps
+    needs: publish-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    concurrency:
+      group: deploy-ca-shortener
+      cancel-in-progress: false
+    steps:
+      - name: Log in to Azure with OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure Container Apps extension is installed
+        run: az extension add --name containerapp --upgrade --yes
+
+      - name: Deploy container image to Container App
+        run: |
+          az containerapp update \
+            --name ca-shortener \
+            --resource-group rg-shortener \
+            --image "${{ needs.publish-image.outputs.image }}"
+
+      - name: Verify deployment and wait for healthy status
+        run: |
+          EXPECTED_IMAGE="${{ needs.publish-image.outputs.image }}"
+          echo "Verifying deployed image matches expected: $EXPECTED_IMAGE"
+          DEPLOYED_IMAGE=$(az containerapp show --name ca-shortener --resource-group rg-shortener --query "properties.template.containers[0].image" -o tsv)
+          if [ "$DEPLOYED_IMAGE" != "$EXPECTED_IMAGE" ]; then
+            echo "Image mismatch: expected '$EXPECTED_IMAGE', found '$DEPLOYED_IMAGE'"
+            exit 1
+          fi
+          echo "Deployed image verified: $DEPLOYED_IMAGE"
+
+          TIMEOUT=120
+          START_TIME=$(date +%s)
+
+          echo "Waiting for latest revision to become ready..."
+          while true; do
+            LATEST_REV=$(az containerapp show --name ca-shortener --resource-group rg-shortener --query "properties.latestRevisionName" -o tsv)
+            READY_REV=$(az containerapp show --name ca-shortener --resource-group rg-shortener --query "properties.latestReadyRevisionName" -o tsv)
+            if [ -n "$LATEST_REV" ] && [ "$LATEST_REV" = "$READY_REV" ]; then
+              echo "Latest revision $LATEST_REV is ready."
+              break
+            fi
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( CURRENT_TIME - START_TIME ))
+            if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+              echo "Timed out waiting for revision $LATEST_REV to become ready (current ready revision: $READY_REV)"
+              exit 1
+            fi
+            echo "Waiting for revision readiness (latest: $LATEST_REV, ready: $READY_REV, elapsed: ${ELAPSED}s)..."
+            sleep 5
+          done
+
+          FQDN=$(az containerapp show --name ca-shortener --resource-group rg-shortener --query "properties.configuration.ingress.fqdn" -o tsv)
+          HEALTH_URL="https://${FQDN}/actuator/health"
+          echo "Polling health endpoint: $HEALTH_URL"
+          while true; do
+            if curl -s -f "$HEALTH_URL" | grep -q '"status":"UP"'; then
+              echo "Health check passed: status UP"
+              break
+            fi
+            CURRENT_TIME=$(date +%s)
+            ELAPSED=$(( CURRENT_TIME - START_TIME ))
+            if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
+              echo "Health check timed out after ${TIMEOUT}s waiting for $HEALTH_URL"
+              exit 1
+            fi
+            echo "Waiting for health check response (elapsed: ${ELAPSED}s)..."
+            sleep 5
+          done
