@@ -23,9 +23,7 @@ WORKDIR /app
 RUN groupadd --system appgroup && useradd --system --gid appgroup --uid 10001 appuser
 
 # Copy executable fat jar from build stage
-COPY --from=builder /workspace/target/*.jar /app/app.jar
-
-RUN chown -R appuser:appgroup /app
+COPY --from=builder --chown=appuser:appgroup /workspace/target/*.jar /app/app.jar
 
 USER appuser
 
