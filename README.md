@@ -1,5 +1,7 @@
 # URL Shortener
 
+[![CI](https://github.com/MEKKAOUIOssamaMoussa/url-shortener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MEKKAOUIOssamaMoussa/url-shortener/actions/workflows/ci.yml)
+
 A high-performance URL shortener built with Java 21 and Spring Boot 4.1.
 
 > **Work in progress**: Currently in Stage 0a (walking skeleton and CI pipeline).
