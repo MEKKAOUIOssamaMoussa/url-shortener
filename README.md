@@ -2,9 +2,11 @@
 
 [![CI](https://github.com/MEKKAOUIOssamaMoussa/url-shortener/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/MEKKAOUIOssamaMoussa/url-shortener/actions/workflows/ci.yml)
 
-A high-performance URL shortener built with Java 21 and Spring Boot 4.1.
+A URL shortener built with Java 21 and Spring Boot 4.1.
 
-> **Work in progress**: Currently in Stage 0a (walking skeleton and CI pipeline).
+> **Status**: Stage 0 complete: walking skeleton deployed to Azure Container Apps by GitHub Actions (OIDC, no stored credentials). No URL-shortening features yet.
+
+Live demo: https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontainerapps.io/api/hello (scales to zero when idle; the first request can take ~30 s).
 
 ## Running Locally
 
