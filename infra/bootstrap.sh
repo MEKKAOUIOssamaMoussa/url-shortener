@@ -115,7 +115,12 @@ az role assignment create \
 #      on the main branch of the repository.
 # ------------------------------------------------------------------------------
 echo "==> 7. Creating federated credential for GitHub Actions OIDC..."
-FEDERATED_SUBJECT="repo:${GITHUB_REPO}:ref:refs/heads/main"
+# GitHub includes immutable numeric IDs (owner and repo IDs) in the token subject claim
+# so the trust rule cannot be matched by a different account or repository that later reuses the same names.
+# Azure matches the subject claim exactly, so the federated credential must match this format.
+OWNER_ID=$(gh api "users/${GITHUB_REPO%%/*}" --jq .id)
+REPO_ID=$(gh api "repos/${GITHUB_REPO}" --jq .id)
+FEDERATED_SUBJECT="repo:${GITHUB_REPO%%/*}@${OWNER_ID}/${GITHUB_REPO##*/}@${REPO_ID}:ref:refs/heads/main"
 az ad app federated-credential create \
   --id "${APP_ID}" \
   --parameters "{
