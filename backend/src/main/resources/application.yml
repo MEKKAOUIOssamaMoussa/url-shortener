@@ -2,6 +2,9 @@ server:
   port: 8080
   shutdown: graceful
 
+shortener:
+  base-url: ${SHORTENER_BASE_URL:http://localhost:8080}
+
 spring:
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/shortener}
