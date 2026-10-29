@@ -37,3 +37,17 @@ docker run -p 8080:8080 --rm url-shortener-backend
 Access the endpoints at:
 - `http://localhost:8080/api/hello`
 - `http://localhost:8080/actuator/health`
+
+### Example API Usage
+
+1. Create a short URL:
+```bash
+curl -si -X POST http://localhost:8080/api/urls \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/some/long/path"}'
+```
+
+2. Follow the redirect:
+```bash
+curl -si http://localhost:8080/<code-from-response>
+```

@@ -43,6 +43,9 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 2. **Operational Cost**:
    * *Hypothesis*: Steady-state monthly cloud expenditure will remain near \$0.00 by remaining within ACA's free tier consumption grant and Neon's serverless free tier.
    * *Result*: Not yet measured. To check: Azure Cost Management after the first month.
+3. **Code Collision Frequency**:
+   * *Hypothesis*: With 7-char base62 codes, collisions should never be observed at demo scale.
+   * *Result*: To be evaluated as dataset grows.
 
 ---
 
@@ -65,3 +68,10 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   insert into short_url (code,target_url) values (?,?) returning id,created_at
   ```
   This maintains the database clock as the single source of truth without incurring an extra `SELECT` round-trip.
+
+---
+
+## 7. Stage 1: API & Redirection Decisions (Step 2)
+
+* **HTTP 302 Found vs 301 Moved Permanently**: Redirection uses HTTP 302 (Found) instead of 301 (Moved Permanently). Browsers aggressively cache 301 responses on the client side, which would bypass the backend on subsequent redirects and prevent click tracking and analytics (introduced in Stage 5).
+* **Random Code Generation with DB Unique Constraint & Retry Outside Transactions**: Short codes are generated as random 7-character base-62 strings from `[0-9A-Za-z]`. Collision detection is anchored in the database's named unique constraint (`uq_short_url_code`). The service retry loop operates outside any ambient `@Transactional` context so that each failed insertion attempt rolls back cleanly in its own isolated transaction without aborting the surrounding connection state, and retries with a fresh code up to 3 times before failing.
