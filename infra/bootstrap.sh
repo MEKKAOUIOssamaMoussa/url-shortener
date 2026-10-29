@@ -142,3 +142,57 @@ gh secret set AZURE_TENANT_ID -b "${TENANT_ID}" -R "${GITHUB_REPO}"
 gh secret set AZURE_SUBSCRIPTION_ID -b "${SUBSCRIPTION_ID}" -R "${GITHUB_REPO}"
 
 echo "==> Bootstrap completed successfully!"
+
+# ==============================================================================
+# Stage 1: database connection
+#
+# WHAT: Configures database credentials and runtime environment variables for
+#       Azure Container Apps to connect to Neon PostgreSQL.
+#
+# WHY:
+#   - Database Password Isolation: The password is stored as a Container Apps
+#     secret ('db-password') and referenced using 'secretref:db-password'. The
+#     URL and username are plain environment variables. The deployment pipeline
+#     (CI) never sees the DB password and only swaps the image.
+#   - Direct Connection over Pooler: Neon's direct (non-pooler) host is used
+#     instead of the PgBouncer pooler endpoint. Neon recommends direct connections
+#     for schema migrations; PgBouncer in transaction mode does not maintain session
+#     state across transactions. In addition, HikariCP within Spring Boot is
+#     already an in-process connection pool.
+#   - Ingress FQDN Dynamic Derivation: SHORTENER_BASE_URL is dynamically
+#     queried from the Container App's real ingress FQDN via az containerapp show
+#     instead of hardcoding.
+# ==============================================================================
+echo "==> Configuring Stage 1 database connection..."
+
+if [ -z "${NEON_HOST:-}" ] || [ -z "${NEON_DB:-}" ] || [ -z "${NEON_USER:-}" ] || [ -z "${NEON_PW:-}" ]; then
+  echo "ERROR: NEON_HOST, NEON_DB, NEON_USER, and NEON_PW environment variables must all be set and non-empty." >&2
+  exit 1
+fi
+
+APP_FQDN=$(az containerapp show \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --query "properties.configuration.ingress.fqdn" \
+  -o tsv)
+SHORTENER_BASE_URL="https://${APP_FQDN}"
+DB_URL="jdbc:postgresql://${NEON_HOST}/${NEON_DB}?sslmode=require"
+
+# Set Container App secret for the database password
+az containerapp secret set \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --secrets "db-password=${NEON_PW}"
+
+# Update environment variables referencing the secret; -o none keeps output short
+az containerapp update \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --set-env-vars \
+    DB_URL="${DB_URL}" \
+    DB_USERNAME="${NEON_USER}" \
+    DB_PASSWORD="secretref:db-password" \
+    SHORTENER_BASE_URL="${SHORTENER_BASE_URL}" \
+  -o none
+
+echo "==> Stage 1 database connection configured successfully!"
