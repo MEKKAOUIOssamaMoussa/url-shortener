@@ -46,7 +46,8 @@ class ShortUrlRepositoryTest {
         repository.saveAndFlush(new ShortUrl("dup123", "https://first.com"));
 
         assertThatThrownBy(() -> repository.saveAndFlush(new ShortUrl("dup123", "https://second.com")))
-                .isInstanceOf(DataIntegrityViolationException.class);
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .satisfies(ex -> assertThat(ShortUrlService.isUniqueCodeViolation((DataIntegrityViolationException) ex)).isTrue());
     }
 
     @Test
