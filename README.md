@@ -14,6 +14,11 @@ Live demo: https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontai
 - Java 21 (Eclipse Temurin recommended)
 - Docker Desktop or Docker engine
 
+### Start PostgreSQL
+```bash
+docker compose up -d postgres
+```
+
 ### Option 1: Run with Maven Wrapper
 ```bash
 cd backend

@@ -52,3 +52,16 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 * Will Neon serverless connection latency require connection pooling adjustments (e.g., HikariCP sizing or PgBouncer) during burst traffic?
 * At what scale does caching (Redis) become mandatory to protect Neon compute hours?
 * What makes up the ~24 s of cold start outside Spring, and is a smaller image worth it?
+
+---
+
+## 6. Stage 1: Persistence Decisions (Step 1)
+
+* **Schema Evolution via Flyway with Hibernate Validation**: Schema migrations are managed solely via versioned SQL scripts in Flyway (`V1__create_short_url.sql`). Hibernate DDL generation is restricted to `validate` (`spring.jpa.hibernate.ddl-auto: validate`), preventing runtime schema mutations and ensuring entities stay in lockstep with Flyway.
+* **Testcontainers over In-Memory H2**: Tests run against real `postgres:18` instances wired via Spring Boot's `@ServiceConnection` and Testcontainers. This guarantees identical dialect, type behaviors (`TIMESTAMPTZ`, `BIGSERIAL`), and constraint enforcement without discrepancy between test and production engines.
+* **Open Session In View (OSIV) Disabled**: `spring.jpa.open-in-view` is set to `false`. Disabling OSIV prevents Hibernate sessions and database connections from staying open across the full HTTP request lifecycle, avoiding connection pool starvation and enforcing clear transactional boundaries.
+* **Database Clock Authority with Single-Statement `RETURNING`**: The `createdAt` column is defaulted to `now()` in the PostgreSQL schema and mapped on `ShortUrl` using `@Generated` with `insertable = false, updatable = false`. Hibernate ORM 7 leverages PostgreSQL's `RETURNING` clause to fetch both `id` and `created_at` in a single SQL operation:
+  ```sql
+  insert into short_url (code,target_url) values (?,?) returning id,created_at
+  ```
+  This maintains the database clock as the single source of truth without incurring an extra `SELECT` round-trip.
