@@ -75,3 +75,14 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 
 * **HTTP 302 Found vs 301 Moved Permanently**: Redirection uses HTTP 302 (Found) instead of 301 (Moved Permanently). Browsers aggressively cache 301 responses on the client side, which would bypass the backend on subsequent redirects and prevent click tracking and analytics (introduced in Stage 5).
 * **Random Code Generation with DB Unique Constraint & Retry Outside Transactions**: Short codes are generated as random 7-character base-62 strings from `[0-9A-Za-z]`. Collision detection is anchored in the database's named unique constraint (`uq_short_url_code`). The service retry loop operates outside any ambient `@Transactional` context so that each failed insertion attempt rolls back cleanly in its own isolated transaction without aborting the surrounding connection state, and retries with a fresh code up to 3 times before failing.
+
+---
+
+## 8. Stage 1: Cloud Persistence Decisions (Step 3)
+
+* **Database Password in Container Apps Secret (Not GitHub Secrets)**:
+  * *Rationale*: The CI deployment workflow has no need to know or manage database credentials; it only authenticates via OIDC and deploys container image tags (`az containerapp update --image`). Storing the database password directly in Azure Container Apps as a secret (`db-password`) and referencing it in the container environment via `secretref:db-password` follows least-privilege principles and prevents sensitive database secrets from residing in CI.
+* **Direct Host over Neon Connection Pooler**:
+  * *Rationale*: Neon’s docs recommend the direct (non-pooled) connection for schema migrations. The pooled endpoint runs PgBouncer in transaction mode, which doesn’t keep session state between transactions. The app already pools connections in-process with HikariCP, so an extra pooler adds nothing at this scale. (Not verified: exactly which Flyway operations would break through the pooler.)
+* **Neon Free Tier Idle Suspension & Wake-up**:
+  * *Rationale*: Neon's free tier automatically suspends compute endpoints after a period of inactivity. When a request arrives after an idle period, the initial response latency includes the Neon database compute wake-up alongside the Container App scale-to-zero container start.
