@@ -14,6 +14,11 @@ Live demo: https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontai
 - Java 21 (Eclipse Temurin recommended)
 - Docker Desktop or Docker engine
 
+### Start PostgreSQL
+```bash
+docker compose up -d postgres
+```
+
 ### Option 1: Run with Maven Wrapper
 ```bash
 cd backend
@@ -32,3 +37,17 @@ docker run -p 8080:8080 --rm url-shortener-backend
 Access the endpoints at:
 - `http://localhost:8080/api/hello`
 - `http://localhost:8080/actuator/health`
+
+### Example API Usage
+
+1. Create a short URL:
+```bash
+curl -si -X POST http://localhost:8080/api/urls \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://example.com/some/long/path"}'
+```
+
+2. Follow the redirect:
+```bash
+curl -si http://localhost:8080/<code-from-response>
+```

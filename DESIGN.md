@@ -43,6 +43,9 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 2. **Operational Cost**:
    * *Hypothesis*: Steady-state monthly cloud expenditure will remain near \$0.00 by remaining within ACA's free tier consumption grant and Neon's serverless free tier.
    * *Result*: Not yet measured. To check: Azure Cost Management after the first month.
+3. **Code Collision Frequency**:
+   * *Hypothesis*: With 7-char base62 codes, collisions should never be observed at demo scale.
+   * *Result*: To be evaluated as dataset grows.
 
 ---
 
@@ -52,3 +55,23 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 * Will Neon serverless connection latency require connection pooling adjustments (e.g., HikariCP sizing or PgBouncer) during burst traffic?
 * At what scale does caching (Redis) become mandatory to protect Neon compute hours?
 * What makes up the ~24 s of cold start outside Spring, and is a smaller image worth it?
+
+---
+
+## 6. Stage 1: Persistence Decisions (Step 1)
+
+* **Schema Evolution via Flyway with Hibernate Validation**: Schema migrations are managed solely via versioned SQL scripts in Flyway (`V1__create_short_url.sql`). Hibernate DDL generation is restricted to `validate` (`spring.jpa.hibernate.ddl-auto: validate`), preventing runtime schema mutations and ensuring entities stay in lockstep with Flyway.
+* **Testcontainers over In-Memory H2**: Tests run against real `postgres:18` instances wired via Spring Boot's `@ServiceConnection` and Testcontainers. This guarantees identical dialect, type behaviors (`TIMESTAMPTZ`, `BIGSERIAL`), and constraint enforcement without discrepancy between test and production engines.
+* **Open Session In View (OSIV) Disabled**: `spring.jpa.open-in-view` is set to `false`. Disabling OSIV prevents Hibernate sessions and database connections from staying open across the full HTTP request lifecycle, avoiding connection pool starvation and enforcing clear transactional boundaries.
+* **Database Clock Authority with Single-Statement `RETURNING`**: The `createdAt` column is defaulted to `now()` in the PostgreSQL schema and mapped on `ShortUrl` using `@Generated` with `insertable = false, updatable = false`. Hibernate ORM 7 leverages PostgreSQL's `RETURNING` clause to fetch both `id` and `created_at` in a single SQL operation:
+  ```sql
+  insert into short_url (code,target_url) values (?,?) returning id,created_at
+  ```
+  This maintains the database clock as the single source of truth without incurring an extra `SELECT` round-trip.
+
+---
+
+## 7. Stage 1: API & Redirection Decisions (Step 2)
+
+* **HTTP 302 Found vs 301 Moved Permanently**: Redirection uses HTTP 302 (Found) instead of 301 (Moved Permanently). Browsers aggressively cache 301 responses on the client side, which would bypass the backend on subsequent redirects and prevent click tracking and analytics (introduced in Stage 5).
+* **Random Code Generation with DB Unique Constraint & Retry Outside Transactions**: Short codes are generated as random 7-character base-62 strings from `[0-9A-Za-z]`. Collision detection is anchored in the database's named unique constraint (`uq_short_url_code`). The service retry loop operates outside any ambient `@Transactional` context so that each failed insertion attempt rolls back cleanly in its own isolated transaction without aborting the surrounding connection state, and retries with a fresh code up to 3 times before failing.
