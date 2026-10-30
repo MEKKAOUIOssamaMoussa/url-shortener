@@ -1,9 +1,11 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.cache.UrlCache;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+
+import java.util.Optional;
 
 @Service
 public class ShortUrlService {
@@ -13,10 +15,12 @@ public class ShortUrlService {
 
     private final CodeGenerator codeGenerator;
     private final ShortUrlRepository repository;
+    private final UrlCache urlCache;
 
-    public ShortUrlService(CodeGenerator codeGenerator, ShortUrlRepository repository) {
+    public ShortUrlService(CodeGenerator codeGenerator, ShortUrlRepository repository, UrlCache urlCache) {
         this.codeGenerator = codeGenerator;
         this.repository = repository;
+        this.urlCache = urlCache;
     }
 
     public ShortUrl create(String targetUrl) {
@@ -37,10 +41,15 @@ public class ShortUrlService {
         throw new CodeGenerationExhaustedException("Exhausted retries generating unique short URL code");
     }
 
-    @Transactional(readOnly = true)
-    public ShortUrl findByCode(String code) {
-        return repository.findByCode(code)
+    public String findTargetUrl(String code) {
+        Optional<String> cached = urlCache.get(code);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
+        ShortUrl entity = repository.findByCode(code)
                 .orElseThrow(() -> new ShortUrlNotFoundException("Short URL not found for code: " + code));
+        urlCache.put(code, entity.getTargetUrl());
+        return entity.getTargetUrl();
     }
 
     static boolean isUniqueCodeViolation(DataIntegrityViolationException ex) {

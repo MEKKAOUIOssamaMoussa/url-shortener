@@ -42,9 +42,13 @@ location: https://example.com/some/long/path
 - Java 21 (Eclipse Temurin recommended)
 - Docker Desktop or Docker engine
 
-### Start PostgreSQL
+### Start Dependencies
 ```bash
+# Start PostgreSQL only
 docker compose up -d postgres
+
+# Or start both PostgreSQL and Redis (for cache testing)
+docker compose up -d
 ```
 
 ### Option 1: Run with Maven Wrapper
@@ -52,9 +56,27 @@ docker compose up -d postgres
 cd backend
 ./mvnw spring-boot:run
 ```
-Access the application at `http://localhost:8080/api/hello` or `http://localhost:8080/actuator/health`.
+Access the application health endpoint at `http://localhost:8080/actuator/health`.
 
-### Option 2: Run with Docker
+### Option 2: Run Locally with Redis Cache Enabled
+By default, the cache is disabled (`shortener.cache.enabled=false`) and uses a no-op implementation. To enable Redis caching:
+```bash
+export SHORTENER_CACHE_ENABLED=true
+# Default Redis host (localhost) and port (6379) are used automatically.
+# To override Redis host and port, use standard Spring Data Redis environment variables:
+# export SPRING_DATA_REDIS_HOST=localhost
+# export SPRING_DATA_REDIS_PORT=6379
+
+cd backend
+./mvnw spring-boot:run
+```
+Inspect cached keys and TTLs in Redis:
+```bash
+docker compose exec redis redis-cli get url:<code-from-response>
+docker compose exec redis redis-cli ttl url:<code-from-response>
+```
+
+### Option 3: Run with Docker
 ```bash
 # Build the container image
 docker build -t url-shortener-backend backend/
@@ -62,9 +84,7 @@ docker build -t url-shortener-backend backend/
 # Run the container
 docker run -p 8080:8080 --rm url-shortener-backend
 ```
-Access the endpoints at:
-- `http://localhost:8080/api/hello`
-- `http://localhost:8080/actuator/health`
+Access the application health endpoint at `http://localhost:8080/actuator/health`.
 
 ### Example API Usage
 

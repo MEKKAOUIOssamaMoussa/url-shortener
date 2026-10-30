@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.cache.UrlCache;
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -10,16 +11,20 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ShortUrlServiceTest {
 
     private final CodeGenerator codeGenerator = mock(CodeGenerator.class);
     private final ShortUrlRepository repository = mock(ShortUrlRepository.class);
-    private final ShortUrlService service = new ShortUrlService(codeGenerator, repository);
+    private final UrlCache urlCache = mock(UrlCache.class);
+    private final ShortUrlService service = new ShortUrlService(codeGenerator, repository, urlCache);
 
     @Test
     void shouldCreateSuccessfullyOnFirstAttempt() {
@@ -79,22 +84,42 @@ class ShortUrlServiceTest {
     }
 
     @Test
-    void shouldFindByCodeWhenExists() {
-        ShortUrl shortUrl = new ShortUrl("abc1234", "https://example.com");
-        when(repository.findByCode("abc1234")).thenReturn(Optional.of(shortUrl));
+    void shouldReturnCachedTargetUrlOnCacheHitWithoutTouchingRepository() {
+        when(urlCache.get("hit123")).thenReturn(Optional.of("https://example.com/cached"));
 
-        ShortUrl found = service.findByCode("abc1234");
+        String targetUrl = service.findTargetUrl("hit123");
 
-        assertThat(found).isEqualTo(shortUrl);
+        assertThat(targetUrl).isEqualTo("https://example.com/cached");
+        verify(urlCache).get("hit123");
+        verifyNoInteractions(repository);
     }
 
     @Test
-    void shouldThrowNotFoundExceptionWhenCodeDoesNotExist() {
-        when(repository.findByCode("missing")).thenReturn(Optional.empty());
+    void shouldReadFromRepositoryAndPutInCacheOnCacheMiss() {
+        when(urlCache.get("miss123")).thenReturn(Optional.empty());
+        ShortUrl saved = new ShortUrl("miss123", "https://example.com/from-db");
+        when(repository.findByCode("miss123")).thenReturn(Optional.of(saved));
 
-        assertThatThrownBy(() -> service.findByCode("missing"))
+        String targetUrl = service.findTargetUrl("miss123");
+
+        assertThat(targetUrl).isEqualTo("https://example.com/from-db");
+        verify(urlCache).get("miss123");
+        verify(repository, times(1)).findByCode("miss123");
+        verify(urlCache).put("miss123", "https://example.com/from-db");
+    }
+
+    @Test
+    void shouldThrowNotFoundExceptionAndNeverPutWhenCodeNotFound() {
+        when(urlCache.get("unknown")).thenReturn(Optional.empty());
+        when(repository.findByCode("unknown")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.findTargetUrl("unknown"))
                 .isInstanceOf(ShortUrlNotFoundException.class)
-                .hasMessageContaining("missing");
+                .hasMessageContaining("unknown");
+
+        verify(urlCache).get("unknown");
+        verify(repository, times(1)).findByCode("unknown");
+        verify(urlCache, never()).put(anyString(), anyString());
     }
 
     private static DataIntegrityViolationException createConstraintViolationException(String constraintName) {
