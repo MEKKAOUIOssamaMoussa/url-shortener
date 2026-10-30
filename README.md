@@ -56,7 +56,7 @@ docker compose up -d
 cd backend
 ./mvnw spring-boot:run
 ```
-Access the application at `http://localhost:8080/api/hello` or `http://localhost:8080/actuator/health`.
+Access the application health endpoint at `http://localhost:8080/actuator/health`.
 
 ### Option 2: Run Locally with Redis Cache Enabled
 By default, the cache is disabled (`shortener.cache.enabled=false`) and uses a no-op implementation. To enable Redis caching:
@@ -84,9 +84,7 @@ docker build -t url-shortener-backend backend/
 # Run the container
 docker run -p 8080:8080 --rm url-shortener-backend
 ```
-Access the endpoints at:
-- `http://localhost:8080/api/hello`
-- `http://localhost:8080/actuator/health`
+Access the application health endpoint at `http://localhost:8080/actuator/health`.
 
 ### Example API Usage
 
