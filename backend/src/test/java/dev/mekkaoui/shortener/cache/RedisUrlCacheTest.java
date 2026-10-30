@@ -12,7 +12,6 @@ import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactor
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.Duration;
-import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -36,6 +35,7 @@ class RedisUrlCacheTest {
     private StringRedisTemplate redisTemplate;
     private RedisUrlCache cache;
     private final Duration ttl = Duration.ofHours(24);
+    private final Duration negativeTtl = Duration.ofSeconds(60);
 
     @BeforeEach
     void setUp() {
@@ -49,7 +49,7 @@ class RedisUrlCacheTest {
         redisTemplate = new StringRedisTemplate(connectionFactory);
         redisTemplate.afterPropertiesSet();
 
-        cache = new RedisUrlCache(redisTemplate, ttl);
+        cache = new RedisUrlCache(redisTemplate, ttl, negativeTtl);
     }
 
     @AfterEach
@@ -63,16 +63,16 @@ class RedisUrlCacheTest {
     void shouldPutAndGetSuccessfully() {
         cache.put("code123", "https://example.com/target");
 
-        Optional<String> result = cache.get("code123");
+        CacheLookup result = cache.get("code123");
 
-        assertThat(result).contains("https://example.com/target");
+        assertThat(result).isEqualTo(new CacheLookup.Hit("https://example.com/target"));
     }
 
     @Test
-    void shouldReturnEmptyForAbsentKey() {
-        Optional<String> result = cache.get("absent");
+    void shouldReturnMissForAbsentKey() {
+        CacheLookup result = cache.get("absent");
 
-        assertThat(result).isEmpty();
+        assertThat(result).isEqualTo(new CacheLookup.Miss());
     }
 
     @Test
@@ -87,6 +87,37 @@ class RedisUrlCacheTest {
     }
 
     @Test
+    void shouldPutMissingAndReturnKnownMissing() {
+        cache.putMissing("missing123");
+
+        CacheLookup result = cache.get("missing123");
+
+        assertThat(result).isEqualTo(new CacheLookup.KnownMissing());
+    }
+
+    @Test
+    void shouldSetNegativeKeyWithConfiguredNegativeTtl() {
+        cache.putMissing("negTtlCode");
+
+        Long expireSeconds = redisTemplate.getExpire("url:negTtlCode", TimeUnit.SECONDS);
+
+        assertThat(expireSeconds).isNotNull();
+        assertThat(expireSeconds).isGreaterThan(0);
+        assertThat(expireSeconds).isLessThanOrEqualTo(negativeTtl.toSeconds());
+    }
+
+    @Test
+    void shouldOverwriteNegativeCacheWhenLinkIsPut() {
+        cache.putMissing("negCode");
+
+        assertThat(cache.get("negCode")).isEqualTo(new CacheLookup.KnownMissing());
+
+        cache.put("negCode", "https://example.com/created-afterwards");
+
+        assertThat(cache.get("negCode")).isEqualTo(new CacheLookup.Hit("https://example.com/created-afterwards"));
+    }
+
+    @Test
     void shouldGracefullyDegradeWhenRedisIsUnreachable() {
         RedisStandaloneConfiguration unreachableConfig = new RedisStandaloneConfiguration("localhost", 65432);
         LettuceClientConfiguration clientConfig = LettuceClientConfiguration.builder()
@@ -98,11 +129,14 @@ class RedisUrlCacheTest {
         StringRedisTemplate unreachableTemplate = new StringRedisTemplate(unreachableFactory);
         unreachableTemplate.afterPropertiesSet();
 
-        RedisUrlCache unreachableCache = new RedisUrlCache(unreachableTemplate, ttl);
+        RedisUrlCache unreachableCache = new RedisUrlCache(unreachableTemplate, ttl, negativeTtl);
 
-        assertThat(unreachableCache.get("anyCode")).isEmpty();
+        assertThat(unreachableCache.get("anyCode")).isEqualTo(new CacheLookup.Miss());
 
         assertThatCode(() -> unreachableCache.put("anyCode", "https://example.com"))
+                .doesNotThrowAnyException();
+
+        assertThatCode(() -> unreachableCache.putMissing("anyCode"))
                 .doesNotThrowAnyException();
 
         unreachableFactory.destroy();

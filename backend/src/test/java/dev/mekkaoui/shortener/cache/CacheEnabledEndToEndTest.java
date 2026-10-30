@@ -23,6 +23,7 @@ import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = "shortener.cache.enabled=true")
@@ -82,6 +83,27 @@ class CacheEnabledEndToEndTest {
                 .andExpect(header().string("Location", "https://example.com/write-on-create"));
 
         verify(repository, never()).findByCode(code);
+    }
+
+    @Test
+    void shouldCacheNegativeLookupSoSecondMissDoesNotQueryDatabase() throws Exception {
+        assertThat(urlCache).isInstanceOf(RedisUrlCache.class);
+
+        String code = uniqueCode();
+
+        // First GET: code not in DB, should query DB, return 404 ProblemDetail, and cache sentinel
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Short URL not found for code: " + code));
+
+        verify(repository, times(1)).findByCode(code);
+
+        // Second GET: should be known-missing in cache, return identical 404 ProblemDetail without querying DB
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Short URL not found for code: " + code));
+
+        verify(repository, times(1)).findByCode(code);
     }
 
     private static String uniqueCode() {

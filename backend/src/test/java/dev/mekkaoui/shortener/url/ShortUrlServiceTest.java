@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.cache.CacheLookup;
 import dev.mekkaoui.shortener.cache.UrlCache;
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
@@ -91,7 +92,7 @@ class ShortUrlServiceTest {
 
     @Test
     void shouldReturnCachedTargetUrlOnCacheHitWithoutTouchingRepository() {
-        when(urlCache.get("hit123")).thenReturn(Optional.of("https://example.com/cached"));
+        when(urlCache.get("hit123")).thenReturn(new CacheLookup.Hit("https://example.com/cached"));
 
         String targetUrl = service.findTargetUrl("hit123");
 
@@ -101,8 +102,22 @@ class ShortUrlServiceTest {
     }
 
     @Test
+    void shouldThrowNotFoundExceptionWithoutTouchingRepositoryOnKnownMissing() {
+        when(urlCache.get("missing123")).thenReturn(new CacheLookup.KnownMissing());
+
+        assertThatThrownBy(() -> service.findTargetUrl("missing123"))
+                .isInstanceOf(ShortUrlNotFoundException.class)
+                .hasMessageContaining("missing123");
+
+        verify(urlCache).get("missing123");
+        verifyNoInteractions(repository);
+        verify(urlCache, never()).put(anyString(), anyString());
+        verify(urlCache, never()).putMissing(anyString());
+    }
+
+    @Test
     void shouldReadFromRepositoryAndPutInCacheOnCacheMiss() {
-        when(urlCache.get("miss123")).thenReturn(Optional.empty());
+        when(urlCache.get("miss123")).thenReturn(new CacheLookup.Miss());
         ShortUrl saved = new ShortUrl("miss123", "https://example.com/from-db");
         when(repository.findByCode("miss123")).thenReturn(Optional.of(saved));
 
@@ -115,8 +130,8 @@ class ShortUrlServiceTest {
     }
 
     @Test
-    void shouldThrowNotFoundExceptionAndNeverPutWhenCodeNotFound() {
-        when(urlCache.get("unknown")).thenReturn(Optional.empty());
+    void shouldThrowNotFoundExceptionAndPutMissingWhenCodeNotFound() {
+        when(urlCache.get("unknown")).thenReturn(new CacheLookup.Miss());
         when(repository.findByCode("unknown")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.findTargetUrl("unknown"))
@@ -125,6 +140,7 @@ class ShortUrlServiceTest {
 
         verify(urlCache).get("unknown");
         verify(repository, times(1)).findByCode("unknown");
+        verify(urlCache, times(1)).putMissing("unknown");
         verify(urlCache, never()).put(anyString(), anyString());
     }
 

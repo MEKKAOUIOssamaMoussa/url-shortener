@@ -1,7 +1,5 @@
 package dev.mekkaoui.shortener.cache;
 
-import java.util.Optional;
-
 /**
  * Cache for short URL code to target URL mappings.
  * <p>
@@ -11,7 +9,9 @@ import java.util.Optional;
  */
 public interface UrlCache {
 
-    Optional<String> get(String code);
+    CacheLookup get(String code);
 
     void put(String code, String targetUrl);
+
+    void putMissing(String code);
 }
