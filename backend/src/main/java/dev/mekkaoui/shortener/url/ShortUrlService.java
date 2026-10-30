@@ -27,7 +27,9 @@ public class ShortUrlService {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             String code = codeGenerator.generate();
             try {
-                return repository.saveAndFlush(new ShortUrl(code, targetUrl));
+                ShortUrl saved = repository.saveAndFlush(new ShortUrl(code, targetUrl));
+                urlCache.put(saved.getCode(), saved.getTargetUrl());
+                return saved;
             } catch (DataIntegrityViolationException ex) {
                 if (isUniqueCodeViolation(ex)) {
                     if (attempt < MAX_ATTEMPTS) {
