@@ -95,8 +95,7 @@ class ShortUrlControllerTest {
 
     @Test
     void shouldRedirect302WithLocationWhenCodeFound() throws Exception {
-        ShortUrl shortUrl = new ShortUrl("abc1234", "https://example.com/destination");
-        when(shortUrlService.findByCode("abc1234")).thenReturn(shortUrl);
+        when(shortUrlService.findTargetUrl("abc1234")).thenReturn("https://example.com/destination");
 
         mockMvc.perform(get("/abc1234"))
                 .andExpect(status().isFound())
@@ -106,7 +105,7 @@ class ShortUrlControllerTest {
 
     @Test
     void shouldReturn404ProblemDetailWhenCodeNotFound() throws Exception {
-        when(shortUrlService.findByCode("missing"))
+        when(shortUrlService.findTargetUrl("missing"))
                 .thenThrow(new ShortUrlNotFoundException("Short URL not found for code: missing"));
 
         mockMvc.perform(get("/missing"))
@@ -134,7 +133,7 @@ class ShortUrlControllerTest {
 
     @Test
     void shouldReturn500ProblemDetailWithGenericDetailForUnexpectedException() throws Exception {
-        when(shortUrlService.findByCode("abc1234"))
+        when(shortUrlService.findTargetUrl("abc1234"))
                 .thenThrow(new RuntimeException("Sensitive database stacktrace info"));
 
         mockMvc.perform(get("/abc1234"))

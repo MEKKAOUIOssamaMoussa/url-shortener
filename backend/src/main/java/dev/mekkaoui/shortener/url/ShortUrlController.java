@@ -41,10 +41,10 @@ public class ShortUrlController {
 
     @GetMapping("/{code:[0-9A-Za-z]{1,16}}")
     public ResponseEntity<Void> redirect(@PathVariable String code) {
-        ShortUrl entity = shortUrlService.findByCode(code);
+        String targetUrl = shortUrlService.findTargetUrl(code);
         return ResponseEntity
                 .status(HttpStatus.FOUND)
-                .location(URI.create(entity.getTargetUrl()))
+                .location(URI.create(targetUrl))
                 .build();
     }
 }
