@@ -86,3 +86,22 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   * *Rationale*: Neon’s docs recommend the direct (non-pooled) connection for schema migrations. The pooled endpoint runs PgBouncer in transaction mode, which doesn’t keep session state between transactions. The app already pools connections in-process with HikariCP, so an extra pooler adds nothing at this scale. (Not verified: exactly which Flyway operations would break through the pooler.)
 * **Neon Free Tier Idle Suspension & Wake-up**:
   * *Rationale*: Neon's free tier automatically suspends compute endpoints after a period of inactivity. When a request arrives after an idle period, the initial response latency includes the Neon database compute wake-up alongside the Container App scale-to-zero container start.
+
+---
+
+## 9. Stage 2: Cache-Aside Redirect Path Decisions & Hypotheses
+
+* **Cache-Aside Pattern vs Alternatives (Read-Through, Write-Through)**:
+  * *Hypothesis*: Cache-aside on the read path decouples the application from cache availability. The database remains the primary authoritative data store, and the cache acts purely as an ephemeral performance optimization. If Redis fails or is unreachable, the application degrades gracefully to reading from PostgreSQL with no user-facing errors. In contrast, write-through or read-through mechanisms tightly couple writes to cache health and require distributed transaction semantics or fallback logic in the persistence layer.
+* **`UrlCache` Abstraction and `NoOpUrlCache`**:
+  * *Hypothesis*: Abstracting cache operations behind `UrlCache` (with `get` and `put`) combined with conditional configuration (`@ConditionalOnProperty(prefix = "shortener.cache", name = "enabled", havingValue = "true")`) allows the production Azure deployment (which has no Redis) to operate completely independent of Redis libraries and connection state using `NoOpUrlCache`.
+* **Data Immutability & Zero Invalidation Complexity**:
+  * *Hypothesis*: Short URL mappings (`code -> targetUrl`) are immutable—there are no update endpoints or entity mutators. Therefore, cached mappings can never become stale relative to the database, eliminating cache invalidation complexity (cache stampede on invalidation, race conditions, dual-write consistency).
+* **24-Hour Cache TTL**:
+  * *Hypothesis*: A 24-hour TTL (`shortener.cache.ttl: 24h`) set atomically on `SET` balances memory retention and eviction churn. Because mappings are immutable, TTL does not serve staleness protection; it serves as a safety net to purge orphaned keys if codes are ever deleted in future stages or if cold keys consume Redis memory, with `allkeys-lru` handling memory exhaustion. The 24h number is an unmeasured baseline guess that will require production workload profiling to evaluate.
+* **Cache Lookup Outside Database Transactions**:
+  * *Hypothesis*: Performing the cache lookup in `ShortUrlService.findTargetUrl(String code)` outside any ambient `@Transactional` context ensures that cache hits incur 0 database interactions—no database connections acquired from HikariCP, no transaction boundaries, and no database round-trips. Database access is only invoked on a cache miss via a `readOnly = true` transactional lookup.
+* **Decoupling Redis Health from `/actuator/health`**:
+  * *Hypothesis*: The cache is an optimization, not a system requirement. Disabling the auto-configured Redis health indicator (`management.health.redis.enabled: false`) ensures that a Redis failure or missing Redis instance does not bring down the application's readiness/liveness status or trigger false-positive container restarts in environments like Azure where Redis is absent.
+* **Timeout Semantics: Refused vs Hanging Connections**:
+  * *Hypothesis*: Short Redis timeouts (`spring.data.redis.connect-timeout: 200ms`, `spring.data.redis.timeout: 200ms`) bound latency degradation when Redis is slow or non-responsive. However, tests against a closed port (e.g. `localhost:65432`) cover connection refusal/absence (which fails immediately at the TCP level), not connection hanging/slowness. Validating the 200 ms timeout requires network latency injection or hanging socket proxies (to be addressed in future load/chaos testing).
