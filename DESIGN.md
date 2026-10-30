@@ -105,3 +105,43 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   * *Hypothesis*: The cache is an optimization, not a system requirement. Disabling the auto-configured Redis health indicator (`management.health.redis.enabled: false`) ensures that a Redis failure or missing Redis instance does not bring down the application's readiness/liveness status or trigger false-positive container restarts in environments like Azure where Redis is absent.
 * **Timeout Semantics: Refused vs Hanging Connections**:
   * *Hypothesis*: Short Redis timeouts (`spring.data.redis.connect-timeout: 200ms`, `spring.data.redis.timeout: 200ms`) bound latency degradation when Redis is slow or non-responsive. However, tests against a closed port (e.g. `localhost:65432`) cover connection refusal/absence (which fails immediately at the TCP level), not connection hanging/slowness. Validating the 200 ms timeout requires network latency injection or hanging socket proxies (to be addressed in future load/chaos testing).
+  * *Annotation & Experiment Result*: Hypothesis confirmed for the closed-port case, but that case was not the problem. When tested against an unallocated port (`localhost:65432`) with a 5 s command timeout and warm-up, the redirect took only 39 ms (n=1). A client that has never connected receives an immediate TCP RST (`Connection refused`), failing fast with `Unable to connect to Redis` without queueing commands. The earlier 794 ms measurement on that closed port was warm-up (initial Netty event loop initialization and JVM class loading), not network blocking.
+
+---
+
+## 10. Stage 2: Fail-Fast Disconnected Behavior & Benchmark (Step A Follow-Up)
+
+* **The Problem (Command Queueing on Disconnect)**:
+  * When Redis stopped after having established an active connection, redirect latency jumped to ~0.42 s (initial n=1 measurement: 421 ms; benchmark median: 418.5 ms). Lettuce's default behavior (`ClientOptions.DisconnectedBehavior.DEFAULT` / `ACCEPT_COMMANDS`) buffers commands in an internal queue while disconnected, waiting for reconnection until `commandTimeout` expires. Each redirect suffered two serial command timeouts: 200 ms on `get` followed by 200 ms on `put` (`Redis command timed out` logged at +207 ms and +414 ms).
+* **The Decision & Alternatives**:
+  * *Decision*: Configure Lettuce via `LettuceClientOptionsBuilderCustomizer` to use `ClientOptions.DisconnectedBehavior.REJECT_COMMANDS`. When disconnected, commands fail immediately without entering the queue. Spring Data Redis translates the rejection into `DataAccessException`, allowing `RedisUrlCache` to degrade instantly to PostgreSQL without delay.
+  * *Alternative 1: Keep default (buffer commands)*: Rejected due to severe latency penalty (~420 ms per redirect) during a cache outage.
+  * *Alternative 2: Lower timeouts (e.g. 10–20 ms)*: Rejected as fragile. Normal network jitter or brief GC pauses under load would cause spurious timeouts on healthy connections.
+  * *Alternative 3: Circuit breaker (e.g. Resilience4j)*: Deferred. Adds an extra dependency, configuration surface, and state machine. The cache is already an optional optimization with graceful degradation.
+  * *Rationale*: `REJECT_COMMANDS` is native to Lettuce, requires zero extra dependencies, preserves configured socket options (`connect-timeout=200ms`), and requires zero changes to `RedisUrlCache`.
+* **Integration Test Verification (n=1, Command Timeout 5 s)**:
+  * In `RedisDownHealthTest`, reproducing the real disconnect scenario (connect first, then stop container via Docker API):
+    * *Without fix (`DEFAULT`)*: **10,027 ms** (5 s on `get` + 5 s on `put`). Test failed against `< 1000 ms` assertion.
+    * *With fix (`REJECT_COMMANDS`)*: **19 ms**. Commands rejected immediately, fallback to Postgres completed cleanly.
+* **Manual Docker Compose Benchmark (n=10 after 1 Warm-up Request Each)**:
+  > [!NOTE]
+  > Local Postgres runs on the same machine (localhost Docker Compose), so database latency here (~7–8 ms) does not represent the Azure/Neon serverless round-trip latency.
+  * **a. Cache disabled (defaults, `NoOpUrlCache`)**:
+    * Raw (s): `0.012454, 0.008528, 0.008218, 0.009406, 0.010665, 0.009299, 0.008891, 0.007802, 0.008353, 0.008393`
+    * Summary: Min = **7.80 ms**, Median = **8.71 ms**, Max = **12.45 ms**
+  * **b. Cache enabled, Redis UP (cache hits)**:
+    * Raw (s): `0.009763, 0.006625, 0.008816, 0.007812, 0.006840, 0.006754, 0.007262, 0.007436, 0.008222, 0.008251`
+    * Summary: Min = **6.63 ms**, Median = **7.62 ms**, Max = **9.76 ms**
+  * **c. Cache enabled, Redis stopped, BEFORE fix (`DEFAULT` queueing, 200 ms timeouts)**:
+    * Raw (s): `0.420798, 0.434366, 0.418432, 0.419918, 0.419002, 0.418517, 0.416214, 0.416515, 0.416904, 0.417715`
+    * Summary: Min = **416.21 ms**, Median = **418.47 ms**, Max = **434.37 ms**
+  * **d. Cache enabled, Redis stopped, AFTER fix (`REJECT_COMMANDS`)**:
+    * Raw (s): `0.011482, 0.010864, 0.013773, 0.012269, 0.008358, 0.009632, 0.010153, 0.019112, 0.015683, 0.010674`
+    * Summary: Min = **8.36 ms**, Median = **11.17 ms**, Max = **19.11 ms**
+* **Reconnection & Recovery Verification**:
+  * After `docker compose start redis`, Lettuce's background `ConnectionWatchdog` successfully reconnected (`Reconnected to localhost/<unresolved>:6379` logged in ~24 s, reflecting exponential backoff retry intervals). Subsequent redirects immediately resumed caching in Redis (verified via `redis-cli get`).
+* **Known Limits & Hypotheses**:
+  * *Connected-but-slow Redis*: If Redis is connected but hanging or responding slowly, requests will still be bounded by the 200 ms command timeout (up to ~400 ms per redirect). `REJECT_COMMANDS` only protects against *disconnected* states.
+  * *Log Flood*: While Redis is down, every redirect logs two WARN lines (`Redis error on get...` and `Redis error on put...`). Under sustained high traffic, this produces log volume until Redis recovers.
+  * *Brief Reconnect Window*: During Lettuce reconnection backoff windows, commands are rejected and fall back to Postgres even if Redis has just come back up, until the next watchdog reconnect tick completes.
+  * *Future Circuit Breaker*: A circuit breaker remains a future option if connected-but-slow Redis or log rate-limiting becomes necessary in production.
