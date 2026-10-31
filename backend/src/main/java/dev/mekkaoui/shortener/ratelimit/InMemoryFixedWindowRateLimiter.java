@@ -49,16 +49,11 @@ public class InMemoryFixedWindowRateLimiter implements RateLimiter {
         long windowIndex = Math.floorDiv(nowMillis, windowMillis);
 
         WindowState state = currentState.get();
-        while (state.windowIndex != windowIndex) {
-            if (windowIndex < state.windowIndex) {
-                // Clock read was slightly behind the currently advanced window (delayed thread);
-                // re-sample the clock to catch up with the active window.
-                now = clock.instant();
-                nowMillis = now.toEpochMilli();
-                windowIndex = Math.floorDiv(nowMillis, windowMillis);
-                state = currentState.get();
-                continue;
-            }
+        // Advance window only when the sampled window is strictly ahead.
+        // If windowIndex < state.windowIndex, the wall clock (e.g. Clock.systemUTC()) moved backwards
+        // (such as during an NTP adjustment) or a thread was briefly descheduled. We do not spin
+        // or rewind state: we count the request in the current active window.
+        while (windowIndex > state.windowIndex) {
             WindowState newState = new WindowState(windowIndex);
             if (currentState.compareAndSet(state, newState)) {
                 state = newState;
@@ -77,10 +72,16 @@ public class InMemoryFixedWindowRateLimiter implements RateLimiter {
             return new RateLimitDecision.Allowed();
         }
 
-        long windowEndMillis = (windowIndex + 1) * windowMillis;
+        // Retry-After computation:
+        // Use state.windowIndex rather than sampled windowIndex in case the clock was behind.
+        // Clamp retryAfter to [1 s, window length] to ensure a sane wait duration even if
+        // nowMillis lags behind due to backward clock shifts.
+        long windowEndMillis = (state.windowIndex + 1) * windowMillis;
         long remainingMillis = windowEndMillis - nowMillis;
         long retryAfterSeconds = Math.max(1, (remainingMillis + 999) / 1000);
-        return new RateLimitDecision.Rejected(Duration.ofSeconds(retryAfterSeconds));
+        long maxRetryAfterSeconds = Math.max(1, window.toSeconds());
+        long clampedRetryAfter = Math.clamp(retryAfterSeconds, 1L, maxRetryAfterSeconds);
+        return new RateLimitDecision.Rejected(Duration.ofSeconds(clampedRetryAfter));
     }
 
     int currentWindowKeyCount() {

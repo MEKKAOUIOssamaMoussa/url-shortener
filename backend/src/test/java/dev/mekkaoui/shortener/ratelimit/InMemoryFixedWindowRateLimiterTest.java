@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 class InMemoryFixedWindowRateLimiterTest {
 
@@ -187,6 +188,44 @@ class InMemoryFixedWindowRateLimiterTest {
 
         assertThat(allowedCount.get()).isEqualTo(limit);
         assertThat(rejectedCount.get()).isEqualTo(threads - limit);
+    }
+
+    @Test
+    void shouldHandleWallClockMovingBackwardsWithoutSpinning() {
+        MutableClock clock = new MutableClock(Instant.ofEpochSecond(0), ZoneOffset.UTC);
+        int limit = 2;
+        InMemoryFixedWindowRateLimiter limiter = new InMemoryFixedWindowRateLimiter(limit, ONE_MINUTE, clock);
+
+        // Advance into window W+2 (120 seconds in) and make one call
+        clock.set(Instant.ofEpochSecond(120));
+        RateLimitDecision firstCall = limiter.tryAcquire("client-1");
+        assertThat(firstCall).isInstanceOf(RateLimitDecision.Allowed.class);
+        assertThat(limiter.currentWindowIndex()).isEqualTo(2L);
+
+        // Set the clock BACK into window W (0 seconds in, a 2-minute jump backward)
+        clock.set(Instant.ofEpochSecond(0));
+
+        // Call tryAcquire wrapped in assertTimeoutPreemptively(Duration.ofSeconds(1), ...)
+        // Under the bug, this spins indefinitely waiting for the clock to reach window 2.
+        RateLimitDecision secondCall = assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> limiter.tryAcquire("client-1")
+        );
+
+        // Assert it returns promptly, counts into the current window (window 2)
+        assertThat(secondCall).isInstanceOf(RateLimitDecision.Allowed.class);
+        assertThat(limiter.currentWindowIndex()).isEqualTo(2L);
+
+        // Limit was 2: next request in this window should be rejected, enforcing limit across backward jump
+        RateLimitDecision thirdCall = assertTimeoutPreemptively(
+                Duration.ofSeconds(1),
+                () -> limiter.tryAcquire("client-1")
+        );
+        assertThat(thirdCall).isInstanceOf(RateLimitDecision.Rejected.class);
+
+        RateLimitDecision.Rejected rejected = (RateLimitDecision.Rejected) thirdCall;
+        assertThat(rejected.retryAfter().getSeconds()).isGreaterThanOrEqualTo(1L);
+        assertThat(rejected.retryAfter().getSeconds()).isLessThanOrEqualTo(ONE_MINUTE.toSeconds());
     }
 
     private static final class MutableClock extends Clock {
