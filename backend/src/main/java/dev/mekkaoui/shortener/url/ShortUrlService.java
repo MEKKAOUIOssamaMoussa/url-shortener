@@ -2,6 +2,7 @@ package dev.mekkaoui.shortener.url;
 
 import dev.mekkaoui.shortener.cache.CacheLookup;
 import dev.mekkaoui.shortener.cache.UrlCache;
+import dev.mekkaoui.shortener.code.CodeGenerator;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;

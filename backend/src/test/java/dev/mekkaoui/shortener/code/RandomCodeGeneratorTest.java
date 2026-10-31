@@ -1,12 +1,12 @@
-package dev.mekkaoui.shortener.url;
+package dev.mekkaoui.shortener.code;
 
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class CodeGeneratorTest {
+class RandomCodeGeneratorTest {
 
-    private final CodeGenerator generator = new CodeGenerator();
+    private final CodeGenerator generator = new RandomCodeGenerator();
 
     @Test
     void shouldGenerateSevenCharacterBase62Code() {
