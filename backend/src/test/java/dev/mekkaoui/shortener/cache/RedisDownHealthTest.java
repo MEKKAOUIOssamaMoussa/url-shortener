@@ -143,8 +143,6 @@ class RedisDownHealthTest {
                 .andExpect(status().isFound())
                 .andExpect(header().string("Location", "https://example.com/stopped-redis-test"));
         long elapsedMillis = (System.nanoTime() - startNanos) / 1_000_000;
-
-        System.out.println("Redirect duration after Redis stopped (timed): " + elapsedMillis + " ms");
         assertThat(elapsedMillis).isLessThan(1000);
     }
 }

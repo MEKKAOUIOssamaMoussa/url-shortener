@@ -1,6 +1,7 @@
 server:
   port: 8080
   shutdown: graceful
+  forward-headers-strategy: native
 
 shortener:
   base-url: ${SHORTENER_BASE_URL:http://localhost:8080}

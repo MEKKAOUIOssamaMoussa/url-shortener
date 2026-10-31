@@ -211,3 +211,51 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 * **Known Gap: Ingress Proxy & `remoteAddr` on Azure Container Apps**:
   * *Limitation*: In this step, the client identity is derived purely from `request.getRemoteAddr()`. Behind reverse proxies, load balancers, or Azure Container Apps Envoy ingress, `request.getRemoteAddr()` may report the internal proxy IP rather than the true originating client IP, effectively applying the 10/min limit globally across all users sharing that ingress node.
   * *Next Step*: Verifying actual Azure headers and configuring proper proxy forward handling (`X-Forwarded-For` / `server.forward-headers-strategy`) is deferred to Step B for live cloud verification.
+
+---
+
+## 13. Stage 3: Client IP Resolution Behind Ingress Decisions & Hypotheses (Step B)
+
+* **Azure Measurements (2026-10-31, Tomcat Access Log %a and X-Forwarded-For)**:
+  * *Ingress Proxy Identity (measured, 2026-10-31, n=2 ingress instances)*:
+    Inspection of Tomcat access logs (`%a` and `%{X-Forwarded-For}i`) on Azure Container Apps revealed that `request.getRemoteAddr()` reported internal ingress proxy addresses: `100.100.0.172` and `100.100.0.11` (both within `100.64.0.0/10` Carrier-Grade NAT, RFC 6598).
+    *Effect*: Without proxy header resolution, a single client's POST requests were load-balanced across the two proxy IPs, allowing 19 requests in one window with limit 10, while simultaneously collapsing all distinct clients behind the ingress into those two shared keys.
+  * *Header Appending Behavior (measured, 2026-10-31, n=1 probe)*:
+    Sending a request with `X-Forwarded-For: 6.6.6.6` arrived at the container as `6.6.6.6, 141.98.208.14`. The Azure ingress appends the observed upstream IP to any client-provided header rather than stripping or overwriting it. Taking the leftmost IP would allow any client to forge arbitrary rate-limit keys by prepending spoofed headers.
+  * *Multi-IP Client Egress (measured, 2026-10-31, n=2 client IPs)*:
+    The same home client connection egressed as two distinct public IPs (`141.98.208.14` and `141.98.208.15`), giving that single client multiple independent rate-limit quotas.
+  * *Boundary Burst (measured, 2026-10-31, n=23 allowed)*:
+    A burst across the 1-minute window boundary allowed 23 requests in ~10 seconds across the boundary transition, confirming the theoretical $2 \times \text{limit}$ fixed-window characteristic live.
+
+* **Resolution Mechanism: Tomcat `RemoteIpValve` via `server.forward-headers-strategy: native`**:
+  * *Decision*: Set `server.forward-headers-strategy: native` in `application.yml`.
+  * *Why Rightmost-Trusted, Not Leftmost*:
+    `RemoteIpValve` inspects `X-Forwarded-For` from right to left, discarding IP addresses that match trusted internal proxies until it encounters the first untrusted IP. This untrusted IP is established as the authentic remote address (`request.getRemoteAddr()`). If an attacker prepends spoofed IPs on the left (e.g. `203.0.113.99, 198.51.100.50`), the rightmost untrusted IP (`198.51.100.50`) is selected, defeating header spoofing.
+  * *No Custom Application Parsing*:
+    `RateLimitFilter` continues to read `request.getRemoteAddr()`. Delegating forward header resolution to the servlet container valve avoids custom, error-prone header parsing in application code.
+
+* **Internal Proxies Matching**:
+  * *Arithmetic & Defaults*:
+    Spring Boot 4.1.1 (`TomcatServerProperties$Remoteip`) and Tomcat 11 (`RemoteIpValve`) default `internal-proxies` to:
+    `"192.168.0.0/16, 172.16.0.0/12, 169.254.0.0/16, fc00::/7, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, fe80::/10, ::1/128"`.
+    `100.64.0.0/10` covers the IPv4 range `100.64.0.0` to `100.127.255.255`. Both Azure ingress addresses (`100.100.0.11` and `100.100.0.172`) fall strictly within this subnet ($64 \le 100 \le 127$). Therefore, we rely on the container default without setting custom proxy regexes or CIDR properties.
+    The live check after deploy will serve as final operational verification.
+
+* **Scheme Isolation**:
+  * While `RemoteIpValve` updates `request.getScheme()` to `"https"` when `X-Forwarded-Proto: https` is present, `ShortUrlController` generates short URLs and redirect targets using `properties.baseUrl()` and explicit database targets, ensuring absolute URL construction remains completely decoupled and unaffected.
+
+* **End-to-End Test Verification**:
+  * Verified in `ClientIpResolutionEndToEndTest` running a real embedded Tomcat server (`@SpringBootTest(webEnvironment = RANDOM_PORT)`):
+    * *Independence*: 10 POSTs for `198.51.100.30` followed by 1 POST for `198.51.100.31` proved that independent client IPs maintain isolated counters (without `forward-headers-strategy: native`, both mapped to loopback `127.0.0.1` and failed with 429).
+    * *Rate Limit Enforcement*: 10 POSTs for `6.6.6.6, 198.51.100.40` succeeded (201) and the 11th was rejected with 429.
+    * *Spoof Resistance*: After exhausting `198.51.100.50`, sending `203.0.113.99, 198.51.100.50` was rejected with 429, verifying that injecting a fake leftmost client IP does not evade the limit.
+    * *Test Order Independence*: Each test operates on a distinct IP range (`.30/.31`, `.40`, `.50`), ensuring zero cross-test interference under container IP resolution.
+
+* **Known Limitations of Per-IP Rate Limiting**:
+  * *Coarseness in Both Directions*:
+    * Many clients behind a shared egress/NAT gateway (e.g. corporate networks, university campuses, mobile carrier CGNAT) share a single rate-limit quota, risking collateral throttling of legitimate users.
+    * A single client distributed across multiple egress IPs (e.g. multi-homed ISP connections, observed live with `.14` and `.15`) receives multiple distinct rate-limit quotas.
+  * *Fixed Window Burst*:
+    * Fixed-window boundaries allow up to $2 \times \text{limit}$ requests across the boundary seam (23 allowed in ~10 s observed live).
+  * *Live Verification*:
+    * Live verification of client IP resolution and rate limiting on Azure Container Apps is marked as TO DO immediately following deployment.
