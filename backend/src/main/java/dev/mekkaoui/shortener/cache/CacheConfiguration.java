@@ -17,7 +17,6 @@ public class CacheConfiguration {
     }
 
     @Bean
-    @ConditionalOnProperty(prefix = "shortener.cache", name = "enabled", havingValue = "true")
     public LettuceClientOptionsBuilderCustomizer lettuceClientOptionsBuilderCustomizer() {
         return builder -> builder.disconnectedBehavior(ClientOptions.DisconnectedBehavior.REJECT_COMMANDS);
     }
