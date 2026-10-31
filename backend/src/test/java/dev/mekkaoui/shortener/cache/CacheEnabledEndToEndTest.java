@@ -2,6 +2,8 @@ package dev.mekkaoui.shortener.cache;
 
 import com.jayway.jsonpath.JsonPath;
 import dev.mekkaoui.shortener.TestcontainersConfiguration;
+import dev.mekkaoui.shortener.ratelimit.RateLimiter;
+import dev.mekkaoui.shortener.ratelimit.RedisFixedWindowRateLimiter;
 import dev.mekkaoui.shortener.url.ShortUrl;
 import dev.mekkaoui.shortener.url.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
@@ -9,12 +11,15 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.never;
@@ -26,7 +31,10 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-@SpringBootTest(properties = "shortener.cache.enabled=true")
+@SpringBootTest(properties = {
+        "shortener.cache.enabled=true",
+        "shortener.rate-limit.store=redis"
+})
 @AutoConfigureMockMvc
 @Import({TestcontainersConfiguration.class, RedisTestcontainersConfiguration.class})
 class CacheEnabledEndToEndTest {
@@ -38,6 +46,12 @@ class CacheEnabledEndToEndTest {
 
     @Autowired
     private UrlCache urlCache;
+
+    @Autowired
+    private RateLimiter rateLimiter;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
     CacheEnabledEndToEndTest(@Autowired MockMvc mockMvc) {
         this.mockMvc = mockMvc;
@@ -104,6 +118,41 @@ class CacheEnabledEndToEndTest {
                 .andExpect(jsonPath("$.detail").value("Short URL not found for code: " + code));
 
         verify(repository, times(1)).findByCode(code);
+    }
+
+    @Test
+    void shouldRateLimitUsingRedisStoreWhenConfigured() throws Exception {
+        assertThat(rateLimiter).isInstanceOf(RedisFixedWindowRateLimiter.class);
+
+        String clientIp = "198.51.100.77";
+        String redisKey = "rl:" + clientIp;
+
+        for (int i = 0; i < 10; i++) {
+            mockMvc.perform(post("/api/urls")
+                            .with(req -> {
+                                req.setRemoteAddr(clientIp);
+                                return req;
+                            })
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"url\":\"https://example.com/redis-limit-" + i + "\"}"))
+                    .andExpect(status().isCreated());
+        }
+
+        mockMvc.perform(post("/api/urls")
+                        .with(req -> {
+                            req.setRemoteAddr(clientIp);
+                            return req;
+                        })
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/redis-limit-11\"}"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().exists(HttpHeaders.RETRY_AFTER))
+                .andExpect(jsonPath("$.status").value(429));
+
+        assertThat(redisTemplate.hasKey(redisKey)).isTrue();
+        Long ttl = redisTemplate.getExpire(redisKey, TimeUnit.SECONDS);
+        assertThat(ttl).isNotNull().isGreaterThan(0L);
+        assertThat(redisTemplate.opsForValue().get(redisKey)).isEqualTo("11");
     }
 
     private static String uniqueCode() {
