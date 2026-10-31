@@ -180,3 +180,34 @@ A URL shortener built in small stages to learn system design, deployment, and CI
     3. *Bounded Database Contention*: Database lookups on miss query an indexed unique key (`WHERE su1_0.code = ?`), executing in under a millisecond on warm PostgreSQL pages. Furthermore, HikariCP bounds active database connections (default pool size 10), preventing unbound connection surges from overwhelming the database engine.
     4. *Natural TTL Desynchronization*: Because links are written to cache at creation time across arbitrary user interactions, their 24-hour expirations naturally disperse over time rather than expiring simultaneously in coordinated batches.
   * *Future Evaluation*: Whether stampede protection is necessary under extreme concurrency will be empirically tested under simulated load using k6 in Stage 6.
+
+---
+
+## 12. Stage 3: Rate Limiting on Creation Path Decisions & Hypotheses (Step A)
+
+* **Why Rate Limit the Creation Path (`POST /api/urls`)**:
+  * *Hypothesis*: A public URL shortener is an attractive target for automated spam, bot enumeration, and resource exhaustion attacks. Allowing unthrottled link creation invites malicious actors to flood the database with bogus URLs, exhausting storage, indexing bandwidth, and code generation space.
+  * *Targeted Protection*: Link creation (`POST /api/urls`) is throttled to a default of 10 requests per 1-minute window per client IP. In contrast, redirection (`GET /{code}`) is intentionally unthrottled: redirects are lightweight (served via Redis cache-aside), and throttling redirects risks penalizing legitimate human consumers behind shared corporate or mobile carrier NAT gateways.
+
+* **Algorithm Choice: Fixed Window Counter vs. Token Bucket / Sliding Window**:
+  * *Decision*: An in-memory fixed window counter with atomic per-window state swaps.
+  * *Bounded Memory with Per-Window Reset*: Memory is bounded across windows because when the window index advances, the rate limiter atomically swaps an immutable holder containing the active window's `ConcurrentHashMap<String, AtomicInteger>`. The old window's map becomes unreferenced and is promptly reclaimed by garbage collection.
+  * *Memory Boundary & Known Limit*: While memory is bounded across window transitions, within any single active 1-minute window the map scales linearly with the number of distinct client IPs encountered. A distributed flood involving millions of unique client IPs inside a single minute window remains a known memory limit.
+  * *Known Flaw (Boundary Burst)*: As with all fixed-window algorithms, a client can theoretically achieve up to $2 \times \text{limit}$ requests across a window boundary (e.g., 10 requests at $T_{59s}$ and 10 requests at $T_{61s}$). Token bucket or sliding log algorithms smooth out boundary bursts, but require continuous per-key timestamp tracking or eviction queues. For our single-replica threat model, the bounded simplicity of fixed-window counters provides sufficient spam deterrence without algorithmic complexity.
+  * *Boundary Swap Concurrency & State Imprecision*: When the window index advances, threads race to install a new `WindowState` via `compareAndSet`. A concurrent thread that sampled the clock just prior to the swap may still increment the old window's map. This minor boundary imprecision is acceptable for fixed window rate limiting.
+
+* **Single-Replica In-Memory Exactness**:
+  * *Hypothesis*: Azure Container Apps runs with `maxReplicas = 1`. In a single-replica deployment, an in-memory counter is exact: there are no multiple JVM instances with fractured local counters, so an in-memory limiter avoids the latency overhead and failure modes of distributed Redis calls on the creation path.
+  * *Default Protection*: Rate limiting is enabled by default (`shortener.rate-limit.enabled=true`) so the Azure deployment is shielded immediately without requiring explicit configuration changes.
+
+* **Servlet Filter (`RateLimitFilter`) vs. Handler Interceptor**:
+  * *Decision*: Implemented as a `OncePerRequestFilter` rather than a Spring MVC `HandlerInterceptor`.
+  * *Rationale*: A servlet filter rejects excessive requests as early as possible in the processing pipeline, avoiding Spring MVC controller dispatching, model resolution, and request body deserialization.
+  * *RFC 9457 Error Response*: On rejection (`HTTP 429 Too Many Requests`), the filter directly writes an RFC 9457 `application/problem+json` body (`title: "Too Many Requests"`, `status: 429`, `detail` specifying retry duration, and `instance: "/api/urls"`) and sets the `Retry-After` header using Spring Boot's autoconfigured Jackson 3 `ObjectMapper`.
+
+* **10 Requests / 1 Minute Baseline**:
+  * *Rationale*: The 10/min threshold is an unmeasured baseline guess. For normal human usage, creating 10 short links in 60 seconds is well above standard interactive needs, while sufficiently restrictive to halt simple brute-force bots and runaway client retry loops. Future load testing with k6 in Stage 6 will refine this threshold.
+
+* **Known Gap: Ingress Proxy & `remoteAddr` on Azure Container Apps**:
+  * *Limitation*: In this step, the client identity is derived purely from `request.getRemoteAddr()`. Behind reverse proxies, load balancers, or Azure Container Apps Envoy ingress, `request.getRemoteAddr()` may report the internal proxy IP rather than the true originating client IP, effectively applying the 10/min limit globally across all users sharing that ingress node.
+  * *Next Step*: Verifying actual Azure headers and configuring proper proxy forward handling (`X-Forwarded-For` / `server.forward-headers-strategy`) is deferred to Step B for live cloud verification.
