@@ -9,6 +9,7 @@ import java.time.Duration;
 public record RateLimitProperties(
         @DefaultValue("true") boolean enabled,
         @DefaultValue("10") int limit,
-        @DefaultValue("1m") Duration window
+        @DefaultValue("1m") Duration window,
+        @DefaultValue("MEMORY") RateLimitStore store
 ) {
 }

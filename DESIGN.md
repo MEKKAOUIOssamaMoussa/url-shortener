@@ -257,5 +257,54 @@ A URL shortener built in small stages to learn system design, deployment, and CI
     * A single client distributed across multiple egress IPs (e.g. multi-homed ISP connections, observed live with `.14` and `.15`) receives multiple distinct rate-limit quotas.
   * *Fixed Window Burst*:
     * Fixed-window boundaries allow up to $2 \times \text{limit}$ requests across the boundary seam (23 allowed in ~10 s observed live).
-  * *Live Verification*:
-    * Live verification of client IP resolution and rate limiting on Azure Container Apps is marked as TO DO immediately following deployment.
+* **Live Azure Verification (2026-10-31, post-deployment)**:
+  * Deployed commit `24f584a` to Azure Container Apps.
+  * Verified live with two concurrent clients from distinct public IPs:
+    * Azure Cloud Shell (`135.220.92.108`): sent 11 POST requests; first 10 returned HTTP 201, 11th returned HTTP 429 at 16:48:01 UTC.
+    * WSL home client (`141.98.208.14` or `.15`; this client alternates between two egress IPs, exact one not captured): sent a POST request at exactly 16:48:01 UTC within the same minute window; returned HTTP 201.
+  * *Outcome*: Proved that per-client IP rate limiting is isolated and functional in production behind Azure's Envoy ingress proxies. Pre-fix behavior had allowed 19 requests across proxies because `request.getRemoteAddr()` had resolved to the two internal proxy IPs (`100.100.0.11` and `100.100.0.172`).
+
+---
+
+## 14. Stage 3: Redis Distributed Rate Limiter Decisions & Hypotheses (Step C)
+
+* **Motivation: Multi-Instance Rate Limiting vs Single-Replica Exactness**:
+  * *Single-Replica vs Multi-Replica*: In Stage 3 Step A, `InMemoryFixedWindowRateLimiter` was chosen for Azure Container Apps because Azure runs with `maxReplicas = 1`. On a single replica, in-memory is exact and incurs zero network latency. However, if the service scales horizontally across multiple replicas, each replica maintains its own isolated in-memory map. A client's traffic distributed round-robin across $N$ instances would effectively receive an aggregate limit of $N \times \text{limit}$.
+  * *Distributed Store*: `RedisFixedWindowRateLimiter` provides a centralized counter in Redis, ensuring all application instances share the exact same quota per client IP (`rl:<clientKey>`).
+  * *Local Full Stack Only*: This feature is designed for local multi-instance testing and environments with Redis infrastructure. Azure Container Apps continues to use the in-memory limiter (no Redis deployed on Azure).
+
+* **Atomic Lua Script with `PEXPIRE ... NX` (Redis 7+)**:
+  * *Single Round-Trip Atomicity*: Rather than separate `INCR` and `EXPIRE` commands (which risk orphan unexpiring keys if the process crashes between commands, or race conditions if concurrent threads attempt to initialize expiry), the rate-limiting logic is executed in a single atomic Lua script:
+    ```lua
+    local count = redis.call('INCR', KEYS[1])
+    redis.call('PEXPIRE', KEYS[1], ARGV[1], 'NX')
+    return { count, redis.call('PTTL', KEYS[1]) }
+    ```
+  * *Why `NX` (Redis 7.0+)*: The `NX` option on `PEXPIRE` sets the expiry only if the key has no existing expiration. This elegantly handles two critical conditions in a single unified branch:
+    1. The first request initializes the key and sets its TTL to the configured window.
+    2. Any subsequent request leaves the already-running TTL untouched, preserving the fixed window expiration.
+    3. If a previous key somehow lost its expiry (or after recovery from an incomplete write), `NX` safely re-attaches the window without resetting an active window.
+  * *Atomic Return*: The script returns both `count` and `PTTL` in the same operation, allowing the Java application to evaluate `count <= limit` and compute the exact remaining seconds for the `Retry-After` header without an extra round trip.
+
+* **Redis-Owned Time vs Clock-Aligned Minute Windows**:
+  * *Window Semantics*:
+    * `InMemoryFixedWindowRateLimiter` calculates window index based on the host clock aligned to wall-clock minutes (`clock.millis() / windowMillis`).
+    * `RedisFixedWindowRateLimiter` starts a client's window upon arrival of their *first request* (key creation + `PEXPIRE`), and the window ends when Redis automatically expires the key.
+  * *Clock Independence*: Time is governed entirely by Redis's internal timer. Application host clock drifts or backward NTP adjustments have zero effect on rate limiting, completely eliminating the backward-clock busy-spin risk identified in Step A.
+  * *Retry Calculation*: `PTTL` provides remaining milliseconds until key expiry. The Java layer calculates `retryAfter = Math.ceil(pttl / 1000.0)` clamped to `[1 s, window]`, safely handling sub-second expirations and negative PTTL edge cases (-1 no ttl, -2 key expired).
+
+* **Fail-Open Strategy and Availability Trade-offs**:
+  * *Fail-Open Behavior*: If Redis is down, times out, or throws a `DataAccessException`, `RedisFixedWindowRateLimiter` logs a single warning and returns `RateLimitDecision.Allowed()`.
+  * *Availability vs Strict Limiting*: Under infrastructure degradation, URL creation availability is prioritized over strict abuse prevention. Rejecting legitimate users because Redis is unreachable is unacceptable when PostgreSQL remains healthy.
+  * *Privacy Protection*: The fail-open log statement logs only the exception message (e.g. `Unable to connect to Redis`) and never logs the client IP address (`clientKey`), protecting user privacy and PII in production log streams.
+
+* **Unconditional Lettuce Fail-Fast Customizer**:
+  * The Lettuce `ClientOptions` customizer (`disconnectedBehavior(REJECT_COMMANDS)` and command timeout matching `shortener.cache.timeout`) was decoupled from `shortener.cache.enabled` and made unconditional in `CacheConfiguration`.
+  * *Rationale*: When `shortener.rate-limit.store=redis` is used without caching, Lettuce must fail fast immediately when Redis is unreachable. Without fail-fast client options, commands would buffer indefinitely or block HTTP worker threads up to default timeouts (60 seconds), degrading application throughput during Redis outages.
+
+* **Configuration and Type-Safe Binding**:
+  * Controlled by `shortener.rate-limit.store`:
+    * Enum values: `MEMORY` (default), `REDIS`.
+    * Default is `MEMORY` via `@DefaultValue("MEMORY")` and `@ConditionalOnProperty(matchIfMissing = true)`.
+    * Case-insensitive matching: Spring Boot's `@ConditionalOnProperty` evaluates `havingValue.equalsIgnoreCase(propertyValue)`, accepting `memory`, `MEMORY`, `redis`, or `REDIS`.
+    * Type-safety: If an invalid value (e.g. `shortener.rate-limit.store=memcached`) is configured, Spring Boot fails fast during startup with a `ConfigurationPropertiesBindException`.

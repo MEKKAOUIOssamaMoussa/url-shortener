@@ -77,7 +77,24 @@ docker compose exec redis redis-cli get url:<code-from-response>
 docker compose exec redis redis-cli ttl url:<code-from-response>
 ```
 
-### Option 3: Run with Docker
+### Option 3: Run Locally with Redis Rate Limiter Enabled
+By default, the rate limiter uses an in-memory store (`shortener.rate-limit.store=memory`), which is exact for single-instance deployments like Azure Container Apps. To share rate limit counters across multiple application instances via Redis:
+```bash
+export SHORTENER_RATE_LIMIT_STORE=redis
+# Optionally enable Redis caching simultaneously:
+# export SHORTENER_CACHE_ENABLED=true
+
+cd backend
+./mvnw spring-boot:run
+```
+Inspect rate-limit keys, counters, and remaining TTLs (in milliseconds) in Redis:
+```bash
+docker compose exec redis redis-cli keys 'rl:*'
+docker compose exec redis redis-cli get 'rl:127.0.0.1'
+docker compose exec redis redis-cli pttl 'rl:127.0.0.1'
+```
+
+### Option 4: Run with Docker
 ```bash
 # Build the container image
 docker build -t url-shortener-backend backend/
