@@ -94,9 +94,9 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 * **Cache-Aside Pattern vs Alternatives (Read-Through, Write-Through)**:
   * *Hypothesis*: Cache-aside on the read path decouples the application from cache availability. The database remains the primary authoritative data store, and the cache acts purely as an ephemeral performance optimization. If Redis fails or is unreachable, the application degrades gracefully to reading from PostgreSQL with no user-facing errors. In contrast, write-through or read-through mechanisms tightly couple writes to cache health and require fallback logic in the persistence layer.
 * **`UrlCache` Abstraction and `NoOpUrlCache`**:
-  * *Hypothesis*: Abstracting cache operations behind `UrlCache` (with `get` and `put`) combined with conditional configuration (`@ConditionalOnProperty(prefix = "shortener.cache", name = "enabled", havingValue = "true")`) ensures that when the cache is disabled (`NoOpUrlCache`), no cache commands are ever sent. However, because the Redis client is on the classpath, Spring Boot still creates the connection factory bean at startup even when the cache is disabled; whether a network connection is opened to default host/port on Azure remains unverified (to check after deploy).
+  * *Hypothesis*: Abstracting cache operations behind `UrlCache` (with `get` and `put`) combined with conditional configuration (`@ConditionalOnProperty(prefix = "shortener.cache", name = "enabled", havingValue = "true")`) ensures that when the cache is disabled (`NoOpUrlCache`), no cache commands are ever sent. However, because the Redis client is on the classpath, Spring Boot still creates the connection factory bean at startup even when the cache is disabled. Verification on 2026-10-30 after deploying to Azure showed `/actuator/health` UP, `POST /api/urls` 201, and redirect 302 working normally; inspection of `az containerapp logs` (53 lines) contained no Redis or Lettuce log messages (no Redis activity observed in application logs, though lack of log output is not conclusive proof that no socket connection was ever attempted).
 * **Data Immutability & Staleness vs Stampede**:
-  * *Hypothesis*: Short URL mappings (`code -> targetUrl`) are immutable—there are no update endpoints or entity mutators. Therefore, immutability removes staleness (no update/delete exists, so a read-then-put race condition can never cache an outdated value, making cache invalidation unnecessary). However, immutability does not prevent cache stampede on TTL expiry or a cold cache; addressing cache stampede is deferred to Stage 2, Step B.
+  * *Hypothesis*: Short URL mappings (`code -> targetUrl`) are immutable—there are no update endpoints or entity mutators. Therefore, immutability removes staleness (no update/delete exists, so a read-then-put race condition can never cache an outdated value, making cache invalidation unnecessary). However, immutability does not prevent cache stampede on TTL expiry or a cold cache; the stampede decision (no protection for now; Stage 6 hypothesis) is recorded in the Stage 2 step B notes below.
 * **24-Hour Cache TTL**:
   * *Hypothesis*: A 24-hour TTL (`shortener.cache.ttl: 24h`) set atomically on `SET` balances memory retention and eviction churn. Because mappings are immutable, TTL does not serve staleness protection; it serves as a safety net to purge orphaned keys if codes are ever deleted in future stages or if cold keys consume Redis memory, with `allkeys-lru` handling memory exhaustion. The 24h number is an unmeasured baseline guess that will require production workload profiling to evaluate.
 * **Cache Lookup Outside Database Transactions**:
@@ -148,3 +148,35 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   * *Log Flood*: While Redis is down, every redirect logs two WARN lines (`Redis error on get...` and `Redis error on put...`). Under sustained high traffic, this produces log volume until Redis recovers.
   * *Brief Reconnect Window*: During Lettuce reconnection backoff windows, commands are rejected and fall back to Postgres even if Redis has just come back up, until the next watchdog reconnect tick completes.
   * *Future Circuit Breaker*: A circuit breaker remains a future option if connected-but-slow Redis or log rate-limiting becomes necessary in production.
+
+---
+
+## 11. Stage 2: Write-on-Create, Negative Caching, & Stampede Decisions (Step B)
+
+* **Write-on-Create (Database-First Outside Transactions)**:
+  * *Decision*: When a link is shortened via `POST /api/urls`, `ShortUrlService.create` writes to PostgreSQL first via `repository.saveAndFlush`. Only upon successful database persistence is `urlCache.put(saved.getCode(), saved.getTargetUrl())` invoked.
+  * *Transaction Isolation*: The operation occurs outside any ambient `@Transactional` boundary. If code generation encounters a collision on `uq_short_url_code` (or another constraint) and retries, the failed attempt never writes to Redis. If retries are exhausted or insertion fails, nothing is cached. Only the final persisted `(code, targetUrl)` mapping enters the cache.
+  * *Benefit*: The very first redirect request for a newly created link hits Redis immediately without querying PostgreSQL, completely eliminating cold-link first-redirect database misses.
+
+* **Negative Caching of Unknown Codes**:
+  * *Decision*: Cache misses for nonexistent codes are cached in Redis via `urlCache.putMissing(code)` with an empty-string sentinel (`""`) and a short TTL (`shortener.cache.negative-ttl`, default `60s`).
+  * *`CacheLookup` Type System*: Replaced `Optional<String>` on `UrlCache.get` with a sealed interface `CacheLookup` permitting `Hit(String targetUrl)`, `KnownMissing()`, and `Miss()`. Handled in `ShortUrlService.findTargetUrl` via an exhaustive switch expression using pattern matching.
+  * *Sentinel Choice & Safety Guarantee*:
+    * Flyway migration `V1__create_short_url.sql` defines `target_url text not null`. While PostgreSQL's `NOT NULL` constraint permits empty strings `''`, the application API is the sole writer to this table and strictly rejects blank strings via bean validation (`@NotBlank` and custom `@ValidUrl` on `CreateShortUrlRequest`).
+    * Therefore, an empty string `""` can never be a legitimate stored target URL in PostgreSQL. Using `""` as the missing sentinel in Redis is unambiguous and requires no additional key namespaces or secondary data structures.
+  * *Negative TTL Rationale (60 s)*:
+    * The 60-second TTL is an unmeasured baseline guess. It is deliberately much shorter than the 24-hour hit TTL to minimize the window during which an externally created link might encounter a stale cached 404, while long enough to blunt repeated lookups for the same missing code.
+    * In practice, because `urlCache.put` uses the exact same key (`url:<code>`), any subsequent creation of that code atomically overwrites the negative sentinel with the real target URL.
+  * *Honest Boundaries & Limits*:
+    * Negative caching protects the database against repeated lookups of the *same* nonexistent code (e.g. broken client retry loops, shared dead links, crawler loops).
+    * It does **not** protect against random-code enumeration or dictionary scanning attacks (where an attacker generates millions of distinct random codes). In that scenario, each lookup produces a distinct cache key, offering zero hit-rate benefit while flooding Redis memory and causing thrashing under `allkeys-lru` eviction.
+    * The proper structural defense against scanning attacks is **Rate Limiting** (deferred to Stage 3), not negative caching.
+
+* **Cache Stampede (Thundering Herd) Decision**:
+  * *Decision*: No single-flight locking, distributed locks, probabilistic early expiration (XFetch), or TTL jitter are implemented in application code for Stage 2.
+  * *Rationale*:
+    1. *Single-Replica Deployment*: Azure Container Apps runs with `maxReplicas = 1`. Distributed lock managers (e.g. Redlock) introduce operational fragility, latency overhead, and external dependencies disproportionate to single-container scale.
+    2. *In-Process Synchronization Limits*: In-process single-flight mechanisms (e.g. `ConcurrentHashMap` of flight promises) only coordinate threads within a single JVM instance and add complexity to cold paths.
+    3. *Bounded Database Contention*: Database lookups on miss query an indexed unique key (`WHERE su1_0.code = ?`), executing in under a millisecond on warm PostgreSQL pages. Furthermore, HikariCP bounds active database connections (default pool size 10), preventing unbound connection surges from overwhelming the database engine.
+    4. *Natural TTL Desynchronization*: Because links are written to cache at creation time across arbitrary user interactions, their 24-hour expirations naturally disperse over time rather than expiring simultaneously in coordinated batches.
+  * *Future Evaluation*: Whether stampede protection is necessary under extreme concurrency will be empirically tested under simulated load using k6 in Stage 6.

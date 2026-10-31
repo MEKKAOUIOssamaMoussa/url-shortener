@@ -8,6 +8,7 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "shortener.cache")
 public record CacheProperties(
         @DefaultValue("false") boolean enabled,
-        @DefaultValue("24h") Duration ttl
+        @DefaultValue("24h") Duration ttl,
+        @DefaultValue("60s") Duration negativeTtl
 ) {
 }

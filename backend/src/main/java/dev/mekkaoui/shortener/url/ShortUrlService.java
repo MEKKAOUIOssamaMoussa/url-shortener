@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.cache.CacheLookup;
 import dev.mekkaoui.shortener.cache.UrlCache;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -27,7 +28,9 @@ public class ShortUrlService {
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             String code = codeGenerator.generate();
             try {
-                return repository.saveAndFlush(new ShortUrl(code, targetUrl));
+                ShortUrl saved = repository.saveAndFlush(new ShortUrl(code, targetUrl));
+                urlCache.put(saved.getCode(), saved.getTargetUrl());
+                return saved;
             } catch (DataIntegrityViolationException ex) {
                 if (isUniqueCodeViolation(ex)) {
                     if (attempt < MAX_ATTEMPTS) {
@@ -42,14 +45,21 @@ public class ShortUrlService {
     }
 
     public String findTargetUrl(String code) {
-        Optional<String> cached = urlCache.get(code);
-        if (cached.isPresent()) {
-            return cached.get();
-        }
-        ShortUrl entity = repository.findByCode(code)
-                .orElseThrow(() -> new ShortUrlNotFoundException("Short URL not found for code: " + code));
-        urlCache.put(code, entity.getTargetUrl());
-        return entity.getTargetUrl();
+        CacheLookup lookup = urlCache.get(code);
+        return switch (lookup) {
+            case CacheLookup.Hit(String targetUrl) -> targetUrl;
+            case CacheLookup.KnownMissing() -> throw new ShortUrlNotFoundException("Short URL not found for code: " + code);
+            case CacheLookup.Miss() -> {
+                Optional<ShortUrl> entity = repository.findByCode(code);
+                if (entity.isEmpty()) {
+                    urlCache.putMissing(code);
+                    throw new ShortUrlNotFoundException("Short URL not found for code: " + code);
+                }
+                String targetUrl = entity.get().getTargetUrl();
+                urlCache.put(code, targetUrl);
+                yield targetUrl;
+            }
+        };
     }
 
     static boolean isUniqueCodeViolation(DataIntegrityViolationException ex) {

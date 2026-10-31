@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.cache.CacheLookup;
 import dev.mekkaoui.shortener.cache.UrlCache;
 import org.hibernate.exception.ConstraintViolationException;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -27,7 +29,7 @@ class ShortUrlServiceTest {
     private final ShortUrlService service = new ShortUrlService(codeGenerator, repository, urlCache);
 
     @Test
-    void shouldCreateSuccessfullyOnFirstAttempt() {
+    void shouldCreateSuccessfullyOnFirstAttemptAndPutInCache() {
         when(codeGenerator.generate()).thenReturn("code123");
         ShortUrl saved = new ShortUrl("code123", "https://example.com");
         when(repository.saveAndFlush(any(ShortUrl.class))).thenReturn(saved);
@@ -37,10 +39,11 @@ class ShortUrlServiceTest {
         assertThat(result.getCode()).isEqualTo("code123");
         verify(codeGenerator, times(1)).generate();
         verify(repository, times(1)).saveAndFlush(any(ShortUrl.class));
+        verify(urlCache, times(1)).put("code123", "https://example.com");
     }
 
     @Test
-    void shouldRetryAndSucceedWhenUniqueConstraintViolated() {
+    void shouldRetryAndSucceedWhenUniqueConstraintViolatedAndPutOnlyFinalCodeInCache() {
         when(codeGenerator.generate()).thenReturn("dup123", "uniq123");
         DataIntegrityViolationException collision = createConstraintViolationException("uq_short_url_code");
         ShortUrl saved = new ShortUrl("uniq123", "https://example.com");
@@ -54,10 +57,12 @@ class ShortUrlServiceTest {
         assertThat(result.getCode()).isEqualTo("uniq123");
         verify(codeGenerator, times(2)).generate();
         verify(repository, times(2)).saveAndFlush(any(ShortUrl.class));
+        verify(urlCache, times(1)).put("uniq123", "https://example.com");
+        verify(urlCache, never()).put(eq("dup123"), anyString());
     }
 
     @Test
-    void shouldNotRetryOnDifferentConstraintViolation() {
+    void shouldNotRetryOnDifferentConstraintViolationAndNeverPutInCache() {
         when(codeGenerator.generate()).thenReturn("code123");
         DataIntegrityViolationException otherViolation = createConstraintViolationException("uq_other_constraint");
         when(repository.saveAndFlush(any(ShortUrl.class))).thenThrow(otherViolation);
@@ -67,10 +72,11 @@ class ShortUrlServiceTest {
 
         verify(codeGenerator, times(1)).generate();
         verify(repository, times(1)).saveAndFlush(any(ShortUrl.class));
+        verify(urlCache, never()).put(anyString(), anyString());
     }
 
     @Test
-    void shouldThrowExhaustedExceptionAfterMaxAttempts() {
+    void shouldThrowExhaustedExceptionAfterMaxAttemptsAndNeverPutInCache() {
         when(codeGenerator.generate()).thenReturn("dup1", "dup2", "dup3");
         DataIntegrityViolationException collision = createConstraintViolationException("uq_short_url_code");
         when(repository.saveAndFlush(any(ShortUrl.class))).thenThrow(collision);
@@ -81,11 +87,12 @@ class ShortUrlServiceTest {
 
         verify(codeGenerator, times(3)).generate();
         verify(repository, times(3)).saveAndFlush(any(ShortUrl.class));
+        verify(urlCache, never()).put(anyString(), anyString());
     }
 
     @Test
     void shouldReturnCachedTargetUrlOnCacheHitWithoutTouchingRepository() {
-        when(urlCache.get("hit123")).thenReturn(Optional.of("https://example.com/cached"));
+        when(urlCache.get("hit123")).thenReturn(new CacheLookup.Hit("https://example.com/cached"));
 
         String targetUrl = service.findTargetUrl("hit123");
 
@@ -95,8 +102,22 @@ class ShortUrlServiceTest {
     }
 
     @Test
+    void shouldThrowNotFoundExceptionWithoutTouchingRepositoryOnKnownMissing() {
+        when(urlCache.get("missing123")).thenReturn(new CacheLookup.KnownMissing());
+
+        assertThatThrownBy(() -> service.findTargetUrl("missing123"))
+                .isInstanceOf(ShortUrlNotFoundException.class)
+                .hasMessageContaining("missing123");
+
+        verify(urlCache).get("missing123");
+        verifyNoInteractions(repository);
+        verify(urlCache, never()).put(anyString(), anyString());
+        verify(urlCache, never()).putMissing(anyString());
+    }
+
+    @Test
     void shouldReadFromRepositoryAndPutInCacheOnCacheMiss() {
-        when(urlCache.get("miss123")).thenReturn(Optional.empty());
+        when(urlCache.get("miss123")).thenReturn(new CacheLookup.Miss());
         ShortUrl saved = new ShortUrl("miss123", "https://example.com/from-db");
         when(repository.findByCode("miss123")).thenReturn(Optional.of(saved));
 
@@ -109,8 +130,8 @@ class ShortUrlServiceTest {
     }
 
     @Test
-    void shouldThrowNotFoundExceptionAndNeverPutWhenCodeNotFound() {
-        when(urlCache.get("unknown")).thenReturn(Optional.empty());
+    void shouldThrowNotFoundExceptionAndPutMissingWhenCodeNotFound() {
+        when(urlCache.get("unknown")).thenReturn(new CacheLookup.Miss());
         when(repository.findByCode("unknown")).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.findTargetUrl("unknown"))
@@ -119,6 +140,7 @@ class ShortUrlServiceTest {
 
         verify(urlCache).get("unknown");
         verify(repository, times(1)).findByCode("unknown");
+        verify(urlCache, times(1)).putMissing("unknown");
         verify(urlCache, never()).put(anyString(), anyString());
     }
 

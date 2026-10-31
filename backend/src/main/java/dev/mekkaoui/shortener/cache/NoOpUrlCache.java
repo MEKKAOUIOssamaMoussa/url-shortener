@@ -1,15 +1,17 @@
 package dev.mekkaoui.shortener.cache;
 
-import java.util.Optional;
-
 public class NoOpUrlCache implements UrlCache {
 
     @Override
-    public Optional<String> get(String code) {
-        return Optional.empty();
+    public CacheLookup get(String code) {
+        return new CacheLookup.Miss();
     }
 
     @Override
     public void put(String code, String targetUrl) {
+    }
+
+    @Override
+    public void putMissing(String code) {
     }
 }

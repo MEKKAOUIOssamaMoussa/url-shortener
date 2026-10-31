@@ -13,7 +13,7 @@ public class CacheConfiguration {
     @Bean
     @ConditionalOnProperty(prefix = "shortener.cache", name = "enabled", havingValue = "true")
     public UrlCache redisUrlCache(StringRedisTemplate redisTemplate, CacheProperties properties) {
-        return new RedisUrlCache(redisTemplate, properties.ttl());
+        return new RedisUrlCache(redisTemplate, properties.ttl(), properties.negativeTtl());
     }
 
     @Bean

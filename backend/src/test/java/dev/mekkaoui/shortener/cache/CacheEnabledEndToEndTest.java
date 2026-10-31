@@ -2,6 +2,7 @@ package dev.mekkaoui.shortener.cache;
 
 import com.jayway.jsonpath.JsonPath;
 import dev.mekkaoui.shortener.TestcontainersConfiguration;
+import dev.mekkaoui.shortener.url.ShortUrl;
 import dev.mekkaoui.shortener.url.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -13,12 +14,16 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.util.UUID;
+
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = "shortener.cache.enabled=true")
@@ -42,13 +47,8 @@ class CacheEnabledEndToEndTest {
     void shouldRedirectFromCacheOnSecondRequestWithoutQueryingPostgres() throws Exception {
         assertThat(urlCache).isInstanceOf(RedisUrlCache.class);
 
-        MvcResult postResult = mockMvc.perform(post("/api/urls")
-                        .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"url\":\"https://example.com/cached-e2e\"}"))
-                .andExpect(status().isCreated())
-                .andReturn();
-
-        String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+        String code = uniqueCode();
+        repository.saveAndFlush(new ShortUrl(code, "https://example.com/cached-e2e"));
 
         // First GET: miss in cache, queries Postgres
         mockMvc.perform(get("/" + code))
@@ -63,5 +63,50 @@ class CacheEnabledEndToEndTest {
                 .andExpect(header().string("Location", "https://example.com/cached-e2e"));
 
         verify(repository, times(1)).findByCode(code);
+    }
+
+    @Test
+    void shouldPopulateCacheOnCreateSoSubsequentRedirectDoesNotQueryDatabase() throws Exception {
+        assertThat(urlCache).isInstanceOf(RedisUrlCache.class);
+
+        MvcResult postResult = mockMvc.perform(post("/api/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/write-on-create\"}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+
+        // Redirect should immediately hit cache populated during create
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://example.com/write-on-create"));
+
+        verify(repository, never()).findByCode(code);
+    }
+
+    @Test
+    void shouldCacheNegativeLookupSoSecondMissDoesNotQueryDatabase() throws Exception {
+        assertThat(urlCache).isInstanceOf(RedisUrlCache.class);
+
+        String code = uniqueCode();
+
+        // First GET: code not in DB, should query DB, return 404 ProblemDetail, and cache sentinel
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Short URL not found for code: " + code));
+
+        verify(repository, times(1)).findByCode(code);
+
+        // Second GET: should be known-missing in cache, return identical 404 ProblemDetail without querying DB
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.detail").value("Short URL not found for code: " + code));
+
+        verify(repository, times(1)).findByCode(code);
+    }
+
+    private static String uniqueCode() {
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 10);
     }
 }
