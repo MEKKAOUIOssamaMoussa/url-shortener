@@ -2,6 +2,7 @@ package dev.mekkaoui.shortener.url;
 
 import dev.mekkaoui.shortener.cache.CacheLookup;
 import dev.mekkaoui.shortener.cache.UrlCache;
+import dev.mekkaoui.shortener.code.CodeGenerator;
 import org.hibernate.exception.ConstraintViolationException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
@@ -32,6 +33,8 @@ public class ShortUrlService {
                 urlCache.put(saved.getCode(), saved.getTargetUrl());
                 return saved;
             } catch (DataIntegrityViolationException ex) {
+                // The retry loop and unique constraint stay for both random and sequence strategies:
+                // sequence codes can collide with existing random codes if the strategy is switched on a live database.
                 if (isUniqueCodeViolation(ex)) {
                     if (attempt < MAX_ATTEMPTS) {
                         continue;
