@@ -8,6 +8,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.context.annotation.Import;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
@@ -71,5 +72,35 @@ class ShortenerApplicationTests {
                 .andExpect(status().isNotFound())
                 .andExpect(header().string("Content-Type", containsString("application/problem+json")))
                 .andExpect(jsonPath("$.status").value(404));
+    }
+
+    @Test
+    void shouldRateLimitPostApiUrlsAfterTenRequestsPerWindow() throws Exception {
+        String clientIp = "198.51.100.42";
+        for (int i = 0; i < 10; i++) {
+            mockMvc.perform(post("/api/urls")
+                            .with(request -> {
+                                request.setRemoteAddr(clientIp);
+                                return request;
+                            })
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"url\":\"https://example.com/ratelimit-" + i + "\"}"))
+                    .andExpect(status().isCreated());
+        }
+
+        mockMvc.perform(post("/api/urls")
+                        .with(request -> {
+                            request.setRemoteAddr(clientIp);
+                            return request;
+                        })
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/ratelimit-11\"}"))
+                .andExpect(status().isTooManyRequests())
+                .andExpect(header().exists(HttpHeaders.RETRY_AFTER))
+                .andExpect(header().string("Content-Type", containsString("application/problem+json")))
+                .andExpect(jsonPath("$.status").value(429))
+                .andExpect(jsonPath("$.title").value("Too Many Requests"))
+                .andExpect(jsonPath("$.instance").value("/api/urls"))
+                .andExpect(jsonPath("$.detail").value(containsString("Too many requests. Please retry after")));
     }
 }
