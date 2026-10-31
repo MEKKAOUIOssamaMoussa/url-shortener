@@ -33,7 +33,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest(properties = {
         "shortener.cache.enabled=true",
-        "shortener.rate-limit.store=redis"
+        "shortener.rate-limit.store=redis",
+        "shortener.code.strategy=sequence"
 })
 @AutoConfigureMockMvc
 @Import({TestcontainersConfiguration.class, RedisTestcontainersConfiguration.class})
@@ -90,6 +91,7 @@ class CacheEnabledEndToEndTest {
                 .andReturn();
 
         String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+        assertThat(code).hasSize(7).matches("^[0-9A-Za-z]{7}$");
 
         // Redirect should immediately hit cache populated during create
         mockMvc.perform(get("/" + code))
@@ -97,6 +99,23 @@ class CacheEnabledEndToEndTest {
                 .andExpect(header().string("Location", "https://example.com/write-on-create"));
 
         verify(repository, never()).findByCode(code);
+    }
+
+    @Test
+    void shouldCreateShortUrlWithSequenceStrategyAndRedirect() throws Exception {
+        MvcResult postResult = mockMvc.perform(post("/api/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/sequence-e2e\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.code").isNotEmpty())
+                .andReturn();
+
+        String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+        assertThat(code).hasSize(7).matches("^[0-9A-Za-z]{7}$");
+
+        mockMvc.perform(get("/" + code))
+                .andExpect(status().isFound())
+                .andExpect(header().string("Location", "https://example.com/sequence-e2e"));
     }
 
     @Test

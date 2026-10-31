@@ -33,6 +33,8 @@ public class ShortUrlService {
                 urlCache.put(saved.getCode(), saved.getTargetUrl());
                 return saved;
             } catch (DataIntegrityViolationException ex) {
+                // The retry loop and unique constraint stay for both random and sequence strategies:
+                // sequence codes can collide with existing random codes if the strategy is switched on a live database.
                 if (isUniqueCodeViolation(ex)) {
                     if (attempt < MAX_ATTEMPTS) {
                         continue;

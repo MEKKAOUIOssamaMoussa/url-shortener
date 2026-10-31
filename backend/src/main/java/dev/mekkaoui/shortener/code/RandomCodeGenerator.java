@@ -1,10 +1,7 @@
 package dev.mekkaoui.shortener.code;
 
-import org.springframework.stereotype.Component;
-
 import java.security.SecureRandom;
 
-@Component
 public class RandomCodeGenerator implements CodeGenerator {
 
     private static final int CODE_LENGTH = 7;
