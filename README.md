@@ -12,6 +12,7 @@ Base URL: `https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontai
 *(Scales to zero when idle: the first request after idle took 28.7 s in one measurement, mostly platform start before the app runs.)*
 
 ### 1. Create a Short URL
+*(Rate limited to 10 requests per minute per IP; returns HTTP 429 Too Many Requests with Retry-After when exceeded.)*
 ```bash
 curl -si -X POST https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontainerapps.io/api/urls \
   -H "Content-Type: application/json" \
