@@ -94,6 +94,9 @@ docker compose exec redis redis-cli get 'rl:127.0.0.1'
 docker compose exec redis redis-cli pttl 'rl:127.0.0.1'
 ```
 
+### Code Generation Strategy
+By default, short codes are generated randomly (`shortener.code.strategy=random`). To use sequential, collision-free database codes scrambled with a 42-bit keyed Feistel cipher, set `shortener.code.strategy=sequence` (requires PostgreSQL sequence `short_code_seq`, provisioned by Flyway migration V2). In production, supply a private secret key via `shortener.code.secret` (environment variable `SHORTENER_CODE_SECRET`) to prevent sequence enumeration.
+
 ### Option 4: Run with Docker
 ```bash
 # Build the container image

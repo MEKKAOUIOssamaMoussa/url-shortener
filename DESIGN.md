@@ -45,7 +45,7 @@ A URL shortener built in small stages to learn system design, deployment, and CI
    * *Result*: Not yet measured. To check: Azure Cost Management after the first month.
 3. **Code Collision Frequency**:
    * *Hypothesis*: With 7-char base62 codes, collisions should never be observed at demo scale.
-   * *Result*: To be evaluated as dataset grows.
+   * *Result*: MEASURED 2026-11-01 on Neon: 73 rows in `short_url`; `short_code_seq` `is_called = false` (sequence exists via Flyway V2, never called because Azure runs `RANDOM`). At $n=73$, the next-code collision probability is $\frac{73}{3{,}521{,}614{,}606{,}208} \approx 2.07 \times 10^{-11} \approx 2\text{e-}11$. The hypothesis holds firmly at demo scale.
 
 ---
 
@@ -308,3 +308,63 @@ A URL shortener built in small stages to learn system design, deployment, and CI
     * Default is `MEMORY` via `@DefaultValue("MEMORY")` and `@ConditionalOnProperty(matchIfMissing = true)`.
     * Case-insensitive matching: Spring Boot's `@ConditionalOnProperty` evaluates `havingValue.equalsIgnoreCase(propertyValue)`, accepting `memory`, `MEMORY`, `redis`, or `REDIS`.
     * Type-safety: If an invalid value (e.g. `shortener.rate-limit.store=memcached`) is configured, Spring Boot fails fast during startup with a `ConfigurationPropertiesBindException`.
+
+---
+
+## 15. Stage 4: Code Generation Strategies & Feistel Permutation Decisions (Step A)
+
+* **Strategy Comparison & Architectural Decision**:
+  * Four primary code generation strategies were evaluated:
+    | Strategy | Gains | Costs & Trade-offs | Decision |
+    | :--- | :--- | :--- | :--- |
+    | **Random** (`SecureRandom` + Base62) | Zero coordination; no database round-trip before insert; uniform distribution across the code space. | Collisions increase with table size due to birthday paradox; requires retry loop and unique constraint. | **DEFAULT (Azure unchanged)**. Simple, stateless, perfectly suited for low-to-medium scale. |
+    | **Counter / Sequence** (Postgres `nextval` + Bijective Permutation + Base62) | Mathematical guarantee of zero collisions among sequence codes; predictable sequential allocation. | Extra database round trip per create (`nextval`); sequential codes require scrambling to prevent enumeration; sequence gaps on rollback. | **AVAILABLE VIA CONFIG** (`shortener.code.strategy=sequence`). |
+    | **Hash Truncation** (e.g. SHA-256 / MD5 truncated to 7 chars) | Deterministic mapping; identical URLs can map to identical codes (deduplication). | Truncating a 256-bit hash to 42 bits brings birthday collisions right back; reveals whether two users submitted the same target URL; URL deduplication is a controversial product decision (ownership, analytics, deletion semantics). | **DOCUMENTED ONLY**. Rejected for active generation. |
+    | **Snowflake ID** (Timestamp + Worker ID + Sequence) | Decentralized, monotonic, coordination-free across multiple workers. | Requires ~64 bits ($\approx 11$ Base62 chars, exceeding the 7-char budget); tightly coupled to worker clock synchronization (NTP drift / backward steps cause errors); massive architectural overkill for a single replica (`max_replicas = 1`). | **DOCUMENTED ONLY**. Rejected. |
+  * *Decision*: `random` remains the default strategy deployed to Azure. `sequence` is provided as an alternative strategy toggled via configuration (`shortener.code.strategy=sequence`).
+
+* **Collision Mathematics & Birthday Paradox (COMPUTED)**:
+  * For $M = 62^7 = 3{,}521{,}614{,}606{,}208$ available 7-character Base62 slots and $n$ existing rows:
+    * **Next-code collision probability**: $P(\text{collision}) = \frac{n}{M}$
+    * **At least one collision in table**: $P(\ge 1\text{ collision}) \approx 1 - e^{-\frac{n^2}{2M}}$ (Birthday problem)
+    * **Exhaustion of all 3 creation attempts**: $P(\text{all 3 fail}) = \left(\frac{n}{M}\right)^3$
+  * Computed probabilities across dataset sizes:
+    | Rows ($n$) | $P(\text{next code collides})$ | $P(\ge 1\text{ collision in table})$ | $P(\text{all 3 retry attempts fail})$ |
+    | :--- | :--- | :--- | :--- |
+    | $1{,}000$ | $2.8 \times 10^{-10}$ | $\approx 0$ ($1.4 \times 10^{-7}$) | $2.3 \times 10^{-29}$ |
+    | $100{,}000$ | $2.8 \times 10^{-8}$ | $0.14\%$ ($1.4 \times 10^{-3}$) | $2.3 \times 10^{-23}$ |
+    | $1{,}000{,}000$ | $2.8 \times 10^{-7}$ | $13.2\%$ ($0.132$) | $2.3 \times 10^{-20}$ |
+    | $10{,}000{,}000$ | $2.8 \times 10^{-6}$ | $\approx 100\%$ ($1 - 1.2 \times 10^{-6}$) | $2.3 \times 10^{-17}$ |
+  * *Conclusion*: Collisions become inevitable in the overall dataset long before the total address space fills (birthday paradox at $\sim 10^6$ rows). However, the probability of any single request failing all 3 retries remains vanishingly small ($< 10^{-16}$ even at 10 million URLs), proving that the 3-attempt retry loop makes random generation robust and harmless in production.
+
+* **Production Verification on Neon PostgreSQL (MEASURED)**:
+  * *Measurement Date*: 2026-11-01.
+  * *Live Database State*: Neon production database contains 73 rows in `short_url`.
+  * *Sequence Status*: `short_code_seq` query `SELECT last_value, is_called FROM short_code_seq` confirms `is_called = false`. The sequence exists via Flyway migration V2 but has never been called because Azure runs the default `RANDOM` strategy.
+  * *Collision Probability*: At $n = 73$, next-code collision probability is $73 / 3{,}521{,}614{,}606{,}208 \approx 2.07 \times 10^{-11} \approx 2\text{e-}11$, verifying Hypothesis 3 at demo scale.
+  * *Flyway V2 Deployment Verification*: MEASURED 2026-10-31: Flyway V2 was successfully applied on Neon at deploy time (schema version 2 confirmed in Azure Container Apps logs for image `cb6290a`).
+
+* **Rejected Design: Affine Scramble (Honesty Rule)**:
+  * *Initial Proposal*: Linear congruential bijection $y = (x \cdot A + B) \bmod M$, with coprime multiplier $A$ and offset $B$.
+  * *Vulnerability Caught in Review*: For consecutive sequence values $x_1$ and $x_2 = x_1 + 1$:
+    $$\Delta y = (y_2 - y_1) \equiv A \pmod M$$
+    Because the step is constant, an attacker observing just two consecutively issued links immediately recovers multiplier $A$. They can then enumerate adjacent codes ($y \pm kA \pmod M$) without even knowing $B$.
+  * *Outcome*: Caught during review prior to implementation; rejected in favor of a keyed pseudo-random permutation.
+
+* **Keyed Feistel Cipher Design & Cycle-Walking**:
+  * *Domain*: $M = 62^7 = 3{,}521{,}614{,}606{,}208 < 2^{42} = 4{,}398{,}046{,}511{,}104$.
+  * *Structure*: A balanced 42-bit Feistel network split into two 21-bit halves ($L, R \in [0, 2^{21}-1]$), executed over 4 rounds.
+  * *Round Function*: HMAC-SHA256 (standard `javax.crypto.Mac`, pure JDK) keyed by `shortener.code.secret`. The round number $i \in \{0, 1, 2, 3\}$ and right half $R$ are fed into the HMAC, and the 256-bit digest is truncated to 21 bits ($F(R, i) = \text{HMAC}(K, i \parallel R) \bmod 2^{21}$).
+  * *Cycle-Walking*: Because $2^{42} > M$, the 42-bit permutation can output a value $y \ge M$. Cycle-walking reapplies the permutation repeatedly until $y < M$. Because any bijection on a finite set decomposes into disjoint permutation cycles, cycle-walking is mathematically guaranteed to terminate and preserves a perfect uniform bijection over $[0, M-1]$.
+  * *Cycle-Walking Iterations (MEASURED vs THEORY)*:
+    * *Theoretical Expectation*: $\frac{2^{42}}{M} = \frac{4{,}398{,}046{,}511{,}104}{3{,}521{,}614{,}606{,}208} \approx 1.24887$.
+    * *Empirical Measurement*: Over 1,000,000 consecutive inputs, the Feistel cipher required exactly 1,248,091 total Feistel evaluations, yielding an average of **1.248 iterations** per input (matching theory within 0.07%).
+  * *Cryptographic Limits*:
+    * This is an obfuscation mechanism designed to eliminate enumerable codes; it is **not** a NIST-standardized format-preserving encryption (FPE) scheme such as FF1 or FF3-1.
+    * The default secret in `application.yml` is publicly visible in version control; development codes are not confidential. Production deployments must configure an unguessable private secret via `SHORTENER_CODE_SECRET`.
+
+* **Implementation Notes & Operational Trade-offs**:
+  * *Thread Safety*: `javax.crypto.Mac` instances are mutable and not thread-safe. A `ThreadLocal<Mac>` is maintained in `FeistelCipher` to avoid synchronization bottlenecks while eliminating per-call Mac initialization overhead.
+  * *Non-Transactional Sequences*: PostgreSQL sequences are non-transactional: calling `nextval` immediately advances the sequence and cannot be rolled back. If an insert fails (e.g. timeout, conflict), sequence numbers are lost, leaving harmless gaps in the counter space.
+  * *Latency Impact*: The `sequence` strategy requires an additional synchronous database round trip per create request (`SELECT nextval('short_code_seq')` before `INSERT`), unlike `random` which performs zero database queries before the insert.
+  * *Retention of Retry Loop & Unique Constraint*: Both the unique constraint on `short_url.code` and the 3-attempt retry loop in `ShortUrlService` are retained for both strategies. If an operator switches strategies on a live database or rotates `shortener.code.secret`, sequence-generated codes can collide with previously persisted random codes.
