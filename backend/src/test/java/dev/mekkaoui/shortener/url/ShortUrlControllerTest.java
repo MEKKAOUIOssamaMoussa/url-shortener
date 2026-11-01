@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.analytics.ClickRecorder;
 import dev.mekkaoui.shortener.error.GlobalExceptionHandler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -15,6 +16,8 @@ import org.springframework.test.web.servlet.MockMvc;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -31,6 +34,9 @@ class ShortUrlControllerTest {
 
     @MockitoBean
     private ShortUrlService shortUrlService;
+
+    @MockitoBean
+    private ClickRecorder clickRecorder;
 
     ShortUrlControllerTest(@Autowired MockMvc mockMvc) {
         this.mockMvc = mockMvc;
@@ -49,6 +55,8 @@ class ShortUrlControllerTest {
                 .andExpect(jsonPath("$.code").value("abc1234"))
                 .andExpect(jsonPath("$.shortUrl").value("http://localhost:8080/abc1234"))
                 .andExpect(jsonPath("$.targetUrl").value("https://example.com/target"));
+
+        verify(clickRecorder, never()).record(anyString());
     }
 
     @ParameterizedTest
@@ -101,6 +109,8 @@ class ShortUrlControllerTest {
                 .andExpect(status().isFound())
                 .andExpect(header().string("Location", "https://example.com/destination"))
                 .andExpect(header().doesNotExist("Cache-Control"));
+
+        verify(clickRecorder).record("abc1234");
     }
 
     @Test
@@ -114,6 +124,8 @@ class ShortUrlControllerTest {
                 .andExpect(jsonPath("$.status").value(404))
                 .andExpect(jsonPath("$.title").value("Short URL Not Found"))
                 .andExpect(jsonPath("$.detail").value("Short URL not found for code: missing"));
+
+        verify(clickRecorder, never()).record(anyString());
     }
 
     @Test

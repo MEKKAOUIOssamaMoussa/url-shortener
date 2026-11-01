@@ -2,6 +2,7 @@ package dev.mekkaoui.shortener.analytics;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.SmartLifecycle;
 
 import java.time.Clock;
 import java.time.LocalDate;
@@ -45,7 +46,14 @@ import java.util.concurrent.atomic.LongAdder;
  * are dropped (not retried) to prevent double counting, and the periodic flusher is never suppressed
  * by the {@link ScheduledExecutorService}.
  */
-public class BufferedClickRecorder implements ClickRecorder {
+public class BufferedClickRecorder implements ClickRecorder, SmartLifecycle {
+
+    /**
+     * SmartLifecycle phase chosen so the final flush executes strictly AFTER web server
+     * graceful shutdown (2,147,482,623) and web server stop (2,147,481,599) complete, and
+     * strictly BEFORE the DataSource is destroyed during bean factory closure.
+     */
+    public static final int PHASE = 2_147_480_575; // Integer.MAX_VALUE - 3072
 
     private static final Logger log = LoggerFactory.getLogger(BufferedClickRecorder.class);
 
@@ -175,9 +183,9 @@ public class BufferedClickRecorder implements ClickRecorder {
 
     /**
      * Flushes currently buffered click counts to PostgreSQL.
-     * Package-private test hook allowing deterministic verification without sleep.
+     * Public test hook allowing deterministic verification without sleep.
      */
-    void flush() {
+    public void flush() {
         synchronized (flushLock) {
             long dropped = droppedClicksSinceLastFlush.sumThenReset();
             if (dropped > 0) {
@@ -214,6 +222,31 @@ public class BufferedClickRecorder implements ClickRecorder {
         }
     }
 
+    @Override
+    public int getPhase() {
+        return PHASE;
+    }
+
+    @Override
+    public boolean isAutoStartup() {
+        return true;
+    }
+
+    @Override
+    public void start() {
+        this.running = true;
+    }
+
+    @Override
+    public void stop(Runnable callback) {
+        try {
+            stop();
+        } finally {
+            callback.run();
+        }
+    }
+
+    @Override
     public void stop() {
         running = false;
         try {
@@ -233,6 +266,7 @@ public class BufferedClickRecorder implements ClickRecorder {
         }
     }
 
+    @Override
     public boolean isRunning() {
         return running;
     }
