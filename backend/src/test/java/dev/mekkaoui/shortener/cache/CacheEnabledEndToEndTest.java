@@ -4,6 +4,8 @@ import com.jayway.jsonpath.JsonPath;
 import dev.mekkaoui.shortener.TestcontainersConfiguration;
 import dev.mekkaoui.shortener.ratelimit.RateLimiter;
 import dev.mekkaoui.shortener.ratelimit.RedisFixedWindowRateLimiter;
+import dev.mekkaoui.shortener.analytics.BufferedClickRecorder;
+import dev.mekkaoui.shortener.analytics.ClickRecorder;
 import dev.mekkaoui.shortener.url.ShortUrl;
 import dev.mekkaoui.shortener.url.ShortUrlRepository;
 import org.junit.jupiter.api.Test;
@@ -14,10 +16,13 @@ import org.springframework.context.annotation.Import;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -54,8 +59,57 @@ class CacheEnabledEndToEndTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
+    @Autowired
+    private ClickRecorder clickRecorder;
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
     CacheEnabledEndToEndTest(@Autowired MockMvc mockMvc) {
         this.mockMvc = mockMvc;
+    }
+
+    @Test
+    void shouldBufferClicksOnRedirectAndFlushAggregatedCountsToPostgres() throws Exception {
+        assertThat(clickRecorder).isInstanceOf(BufferedClickRecorder.class);
+        BufferedClickRecorder bufferedRecorder = (BufferedClickRecorder) clickRecorder;
+
+        // 1. Create a link via POST /api/urls
+        MvcResult postResult = mockMvc.perform(post("/api/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/click-stats-e2e\"}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+
+        // 2. Perform 3 redirects (1st hits DB and populates cache if missed, subsequent hit Redis cache)
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
+
+        // 3. Perform one 404 request
+        mockMvc.perform(get("/nonexistentCode")).andExpect(status().isNotFound());
+
+        // 4. Force flush (deterministic verification without sleeping)
+        bufferedRecorder.flush();
+
+        // 5. Verify Postgres click_stats has count 3 for the code and nothing for 404
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        Long count = jdbcTemplate.queryForObject(
+                "select count from click_stats where code = ? and day = ?",
+                Long.class,
+                code,
+                today
+        );
+        assertThat(count).isEqualTo(3L);
+
+        Integer notFoundRows = jdbcTemplate.queryForObject(
+                "select count(*) from click_stats where code = ?",
+                Integer.class,
+                "nonexistentCode"
+        );
+        assertThat(notFoundRows).isZero();
     }
 
     @Test

@@ -1,5 +1,6 @@
 package dev.mekkaoui.shortener.url;
 
+import dev.mekkaoui.shortener.analytics.ClickRecorder;
 import dev.mekkaoui.shortener.url.dto.CreateShortUrlRequest;
 import dev.mekkaoui.shortener.url.dto.ShortUrlResponse;
 import jakarta.validation.Valid;
@@ -18,10 +19,12 @@ public class ShortUrlController {
 
     private final ShortUrlService shortUrlService;
     private final ShortenerProperties properties;
+    private final ClickRecorder clickRecorder;
 
-    public ShortUrlController(ShortUrlService shortUrlService, ShortenerProperties properties) {
+    public ShortUrlController(ShortUrlService shortUrlService, ShortenerProperties properties, ClickRecorder clickRecorder) {
         this.shortUrlService = shortUrlService;
         this.properties = properties;
+        this.clickRecorder = clickRecorder;
     }
 
     @PostMapping("/api/urls")
@@ -42,6 +45,7 @@ public class ShortUrlController {
     @GetMapping("/{code:[0-9A-Za-z]{1,16}}")
     public ResponseEntity<Void> redirect(@PathVariable String code) {
         String targetUrl = shortUrlService.findTargetUrl(code);
+        clickRecorder.record(code);
         return ResponseEntity
                 .status(HttpStatus.FOUND)
                 .location(URI.create(targetUrl))
