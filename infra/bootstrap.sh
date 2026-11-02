@@ -196,3 +196,72 @@ az containerapp update \
   -o none
 
 echo "==> Stage 1 database connection configured successfully!"
+
+# ==============================================================================
+# Stage 7: Static Web Apps
+#
+# WHAT: Hosts the Angular SPA on Azure Static Web Apps (Free), stores its
+#       deployment token as a GitHub secret, and restricts backend CORS to the
+#       production frontend origin. Run by hand on 2026-11-02.
+#
+# WHY:
+#   - Free SKU: no overage billing; past the 100 GB monthly bandwidth quota the
+#     site stops being served instead of incurring charges.
+#   - Region: westeurope was refused at creation ("The selected region is
+#     currently not accepting new customers"), so eastus2 is used. The SWA
+#     region only holds the resource metadata; the static content is
+#     distributed globally, so the region does not affect latency for users.
+#   - Token handling: the deployment token is piped straight from az into
+#     gh secret set and is never displayed or written to disk.
+#   - CORS: production allows only the SWA origin (localhost removed). The
+#     env vars are listed afterwards, because a removal needs a check, not
+#     just a command (Stage 5 access-log incident).
+# ==============================================================================
+echo "==> Configuring Stage 7 Static Web Apps..."
+
+SWA_NAME="swa-shortener"
+SWA_LOCATION="eastus2"
+
+# Microsoft.Web was NotRegistered on this subscription
+az provider register --namespace Microsoft.Web --wait
+
+az staticwebapp create \
+  --name "${SWA_NAME}" \
+  --resource-group "${RG}" \
+  --location "${SWA_LOCATION}" \
+  --sku Free \
+  -o none
+
+SWA_HOST=$(az staticwebapp show \
+  --name "${SWA_NAME}" \
+  --resource-group "${RG}" \
+  --query "defaultHostname" \
+  -o tsv)
+
+# Deployment token goes straight into the GitHub secret (gh reads it from stdin)
+az staticwebapp secrets list \
+  --name "${SWA_NAME}" \
+  --resource-group "${RG}" \
+  --query "properties.apiKey" \
+  -o tsv \
+  | gh secret set AZURE_STATIC_WEB_APPS_API_TOKEN -R "${GITHUB_REPO}"
+
+az containerapp update \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --set-env-vars CORS_ALLOWED_ORIGINS="https://${SWA_HOST}" \
+  -o none
+
+# Check: list env var names and the CORS value actually applied
+az containerapp show \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --query "properties.template.containers[0].env[].name" \
+  -o tsv
+az containerapp show \
+  --name "${APP_NAME}" \
+  --resource-group "${RG}" \
+  --query "properties.template.containers[0].env[?name=='CORS_ALLOWED_ORIGINS'].value" \
+  -o tsv
+
+echo "==> Stage 7 Static Web Apps configured successfully!"
