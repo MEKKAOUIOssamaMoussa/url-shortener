@@ -30,4 +30,9 @@ public class AnalyticsConfiguration {
     public ClickRecorder noOpClickRecorder() {
         return new NoOpClickRecorder();
     }
+
+    @Bean
+    public ClickStatsReader clickStatsReader(JdbcTemplate jdbcTemplate) {
+        return new ClickStatsReader(jdbcTemplate);
+    }
 }

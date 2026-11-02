@@ -27,6 +27,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -110,6 +111,38 @@ class CacheEnabledEndToEndTest {
                 "nonexistentCode"
         );
         assertThat(notFoundRows).isZero();
+    }
+
+    @Test
+    void shouldReturnAccurateAggregatedStatsAfterRedirectsAndBufferFlush() throws Exception {
+        assertThat(clickRecorder).isInstanceOf(BufferedClickRecorder.class);
+        BufferedClickRecorder bufferedRecorder = (BufferedClickRecorder) clickRecorder;
+
+        // 1. Create a link via POST /api/urls
+        MvcResult postResult = mockMvc.perform(post("/api/urls")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"url\":\"https://example.com/stats-e2e-target\"}"))
+                .andExpect(status().isCreated())
+                .andReturn();
+
+        String code = JsonPath.read(postResult.getResponse().getContentAsString(), "$.code");
+
+        // 2. Perform 2 redirects
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
+        mockMvc.perform(get("/" + code)).andExpect(status().isFound());
+
+        // 3. Force flush memory buffer to Postgres
+        bufferedRecorder.flush();
+
+        // 4. Query GET /api/urls/{code}/stats -> assert totalClicks 2 and daily row count 2
+        LocalDate today = LocalDate.now(ZoneOffset.UTC);
+        mockMvc.perform(get("/api/urls/" + code + "/stats"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(code))
+                .andExpect(jsonPath("$.totalClicks").value(2))
+                .andExpect(jsonPath("$.daily", hasSize(1)))
+                .andExpect(jsonPath("$.daily[0].day").value(today.toString()))
+                .andExpect(jsonPath("$.daily[0].count").value(2));
     }
 
     @Test
