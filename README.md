@@ -4,11 +4,14 @@
 
 A URL shortener built with Java 21 and Spring Boot 4.1.
 
-> **Status**: Stage 1 complete: URL shortening and redirection API backed by PostgreSQL on Neon, deployed to Azure Container Apps by GitHub Actions (OIDC, no stored deploy credentials).
+> **Status**: Stages 0-5 and 7 done. Stage 6 (Prometheus/Grafana/k6 load testing) was skipped by decision, so the Stage 2 hypothesis that the cache helps with a remote database or under load remains **UNMEASURED**.
 
 ## Live Demo
 
-Base URL: `https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontainerapps.io`
+Frontend: https://gentle-island-020fcf90f.3.azurestaticapps.net
+*(Deploys happen on merge to `main` when the change touches `frontend/` (or `.github/workflows/frontend.yml`): Frontend CI runs the unit tests and the production build, then uploads that build to Azure Static Web Apps.)*
+
+API base URL: `https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontainerapps.io`
 *(Scales to zero when idle: the first request after idle took 28.7 s in one measurement, mostly platform start before the app runs.)*
 
 ### 1. Create a Short URL
