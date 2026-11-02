@@ -473,3 +473,12 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   cleanup command was never run, and each deploy copied the environment forward (revisions up to
   `0000018`). Found and removed on 2026-11-02 (revision `0000019`). Lesson: a temporary production
   setting needs a removal *check* (list the env vars afterwards), not just a removal command.
+
+---
+
+## 17. Stage 7: Frontend Architecture & CORS Servlet Filter Decisions (Step A1)
+* **CORS Placement: Servlet-Level Filter vs Spring MVC**:
+  * *Decision*: Configure CORS as a servlet-level `FilterRegistrationBean<CorsFilter>` (`Ordered.HIGHEST_PRECEDENCE`), mapped to `/api/*` and ordered strictly before `RateLimitFilter`. In Spring Boot 4.1, `@Order` on a `@Bean` factory method returning a raw `Filter` is not honored by `ServletContextInitializerBeans` unless `@FilterRegistration` is present, making `FilterRegistrationBean` mandatory for reliable filter ordering.
+  * *Why WebMvcConfigurer is Insufficient*: `RateLimitFilter` operates in the servlet filter chain before requests reach Spring MVC's `DispatcherServlet`. When a client exceeds the rate limit, `RateLimitFilter` writes the RFC 9457 HTTP 429 ProblemDetail payload directly to the servlet response stream and short-circuits the chain. If CORS were registered via Spring MVC (`WebMvcConfigurer.addCorsMappings()`), MVC CORS interceptors would never execute on 429 rejections. The HTTP 429 response would leave without `Access-Control-Allow-Origin`, causing the browser to block the response and hide the 429 status and `Retry-After` header from the frontend SPA. Placing `CorsFilter` at the head of the servlet filter chain ensures all responses—including 429 rate-limit rejections—carry proper CORS headers and exposed headers (`Location`, `Retry-After`).
+  * *Configuration*: Path `/api/**`, allowed origins from `shortener.cors.allowed-origins` (`${CORS_ALLOWED_ORIGINS:http://localhost:4200}`), methods `GET, POST, OPTIONS`, allowed headers `Content-Type`, exposed headers `Location, Retry-After`, max age 3600 s.
+  * *Preflight Rate Limit Exemption*: `RateLimitFilter.shouldNotFilter()` explicitly checks `!("POST".equalsIgnoreCase(request.getMethod()) && "/api/urls".equals(request.getRequestURI()))`. HTTP `OPTIONS` preflight requests evaluate to `false` for the POST condition, bypassing the rate limiter filter entirely and consuming 0 tokens.
