@@ -457,4 +457,19 @@ A URL shortener built in small stages to learn system design, deployment, and CI
     * As intended by design, `BufferedClickRecorder.record()` performs a non-blocking $O(1)$ `LongAdder.increment()` on an in-memory map without issuing network or disk I/O on the redirect thread. There is **no measurable latency degradation** introduced by enabling click analytics.
 
 * **Live Azure Restart Experiment**:
-  * **TO DO**: Verifying shutdown flush during Azure Container Apps revision restart under active load remains to be performed in a future testing window.
+  * **DONE (2026-11-02)**: shutdown flush verified on Azure Container Apps during a revision restart right after a burst of 20 clicks (not under concurrent load: no requests were in flight during shutdown). See "Stage 5: live verification on Azure" below.
+
+### Stage 5: live verification on Azure (MEASURED 2026-11-02)
+
+* **Shutdown flush survives a restart in production.** Revision `ca-shortener--0000017`
+  (created 15:48:17 UTC) ran with `SHORTENER_ANALYTICS_FLUSH_INTERVAL=1h` and
+  `SHORTENER_ANALYTICS_FLUSH_THRESHOLD=100000`, so neither periodic nor threshold flushes could run.
+  Stats for `uibkYXU`: 3 before, still 3 after 20 redirects (clicks only in memory), revision
+  restarted at 15:49:41 UTC, then 23 (20 dated 2026-11-02). Only the SmartLifecycle shutdown flush
+  could have written them: Container Apps sends SIGTERM with enough grace time for the final flush.
+  Assumption: single-revision mode had switched traffic to revision 17 (created ~1 min before the clicks).
+* **Operations note (mistake, kept per the honesty rule).** The temporary Tomcat access log enabled on
+  2026-10-31 for the client-IP investigation (it printed client IPs to stdout) was not removed: the
+  cleanup command was never run, and each deploy copied the environment forward (revisions up to
+  `0000018`). Found and removed on 2026-11-02 (revision `0000019`). Lesson: a temporary production
+  setting needs a removal *check* (list the env vars afterwards), not just a removal command.
