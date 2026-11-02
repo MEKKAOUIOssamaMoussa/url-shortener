@@ -105,3 +105,65 @@ When rotating the database password:
      --revision "$ACTIVE_REV"
    ```
    *(Note: The CI deployment workflow does not need any secret updates because it only authenticates via OIDC and updates container images).*
+
+## Stage 7: Static Web Apps
+
+The Angular frontend is hosted on Azure Static Web Apps `swa-shortener` (Free, resource in `eastus2`; content is globally distributed) at `https://gentle-island-020fcf90f.3.azurestaticapps.net`. Setup commands are in the Stage 7 section of [`bootstrap.sh`](bootstrap.sh).
+
+### Deployment token
+
+`AZURE_STATIC_WEB_APPS_API_TOKEN` (GitHub repository secret) is the SWA deployment token. Microsoft describes it as "a token used to identify the application during deployment". It is a bearer credential: anyone holding it can deploy content to this static web app. It is used by the `deploy` job in `.github/workflows/frontend.yml`. It is never displayed: it goes straight from `az` into `gh` through a pipe.
+
+### Token rotation runbook
+
+Rotate when the token may have been exposed:
+```bash
+# 1. Invalidate the current token
+az staticwebapp secrets reset-api-key \
+  --name swa-shortener \
+  --resource-group rg-shortener \
+  -o none
+
+# 2. Pipe the new token into the GitHub secret (gh reads stdin when --body is omitted)
+az staticwebapp secrets list \
+  --name swa-shortener \
+  --resource-group rg-shortener \
+  --query "properties.apiKey" \
+  -o tsv \
+  | gh secret set AZURE_STATIC_WEB_APPS_API_TOKEN -R MEKKAOUIOssamaMoussa/url-shortener
+```
+Deploys between steps 1 and 2 fail. Re-run the latest Frontend CI run on `main` afterwards to confirm the new token works.
+
+### Changing `CORS_ALLOWED_ORIGINS`
+
+Production allows only the SWA origin (`http://localhost:4200` is the local default from `application.yml`, not set in production). Multiple origins are comma-separated.
+```bash
+az containerapp update \
+  --name ca-shortener \
+  --resource-group rg-shortener \
+  --set-env-vars CORS_ALLOWED_ORIGINS="https://gentle-island-020fcf90f.3.azurestaticapps.net" \
+  -o none
+```
+Verify with two preflights (expected: SWA origin `200`, localhost `403`; measured on 2026-11-02):
+```bash
+API="https://$(az containerapp show --name ca-shortener --resource-group rg-shortener \
+  --query properties.configuration.ingress.fqdn -o tsv)/api/urls"
+
+for ORIGIN in https://gentle-island-020fcf90f.3.azurestaticapps.net http://localhost:4200; do
+  curl -s -o /dev/null -w "${ORIGIN} -> %{http_code}\n" -X OPTIONS "${API}" \
+    -H "Origin: ${ORIGIN}" \
+    -H "Access-Control-Request-Method: POST" \
+    -H "Access-Control-Request-Headers: Content-Type"
+done
+```
+
+### Rule: list env vars after every change
+
+Every deploy copies the environment forward to the next revision, so a forgotten temporary setting survives indefinitely (Stage 5 incident: a temporary access log printing client IPs stayed on for revisions up to `0000018`). After **every** env var change, list what is actually set:
+```bash
+az containerapp show \
+  --name ca-shortener \
+  --resource-group rg-shortener \
+  --query "properties.template.containers[0].env[].name" \
+  -o tsv
+```

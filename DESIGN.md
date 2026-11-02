@@ -507,3 +507,26 @@ A URL shortener built in small stages to learn system design, deployment, and CI
 * **HTTP 429 Rate-Limit Countdown**:
   * *Decision*: When creation is rejected with HTTP 429, initiate a 1-second interval countdown from `retryAfterSeconds` that disables the shorten submission button until it reaches 0.
   * *Reasoning*: Prevents spamming a blocked endpoint, provides visible cooldown progress to the user, and cleans up active timers upon component destruction (`DestroyRef.onDestroy`).
+
+---
+
+## 19. Stage 7: Static Web Apps Hosting (Step A3)
+
+* **Hosting: Azure Static Web Apps, Free SKU**:
+  * *Decision*: Serve the prebuilt Angular SPA (`frontend/dist/frontend/browser`, the `@angular/build:application` output folder, confirmed by `ls` of a real build) from `swa-shortener` on the Free plan.
+  * *Reasoning*: The Free plan has no overage billing. Past the bandwidth quota it stops serving instead of billing:
+    * Quota page (https://learn.microsoft.com/en-us/azure/static-web-apps/quotas): "Included bandwidth (per month) | 100 GB" and "Overage bandwidth | Unavailable" (Free plan column).
+    * Pricing FAQ (https://azure.microsoft.com/en-us/pricing/details/app-service/static/): "In the free plan if your site exceeds the 100 GB quota, we will not be able to serve your site. Standard apps that exceed the 100 GB standard quota will be billed at overage rates."
+  * *Deploy*: The `deploy` job in `frontend.yml` runs only on push to `main`, after `build-and-test`. It downloads the tested build artifact and uploads it with `Azure/static-web-apps-deploy@v1` (`action: upload`, `skip_app_build: true`, `output_location: ''`, no API). It has no checkout, so the bytes that passed the tests are the bytes deployed. It has `permissions: {}`: the only credential is the deployment token secret, and `repo_token` is omitted ("Currently used only for commenting on Pull Requests"). No PR preview environments.
+
+* **Region refusal and fallback (MEASURED 2026-11-02)**:
+  * `az staticwebapp create … --location westeurope` was refused: "The selected region is currently not accepting new customers". The resource was created in `eastus2` instead. `Microsoft.Web` had to be registered first (it was `NotRegistered`).
+  * *Why the fallback is acceptable*: The SWA region only holds the resource metadata; the static content is distributed globally, so `eastus2` does not put the files far from European users.
+
+* **CORS: production origin only (MEASURED 2026-11-02)**:
+  * `CORS_ALLOWED_ORIGINS=https://gentle-island-020fcf90f.3.azurestaticapps.net` on `ca-shortener`. `http://localhost:4200` remains only the local default in `application.yml` and is no longer allowed in production.
+  * Preflight (`OPTIONS /api/urls`) from the SWA origin returned **200**; from `http://localhost:4200` it returned **403**.
+
+* **Hosting note (honest)**: The Azure free trial ends ~2026-11-05. The owner has decided not to upgrade for now, so the live demo (backend on Container Apps and frontend on Static Web Apps) is expected to stop working then. The code, workflows and this record stay on GitHub.
+
+* **Live end-to-end check after deploy**: **TO DO**. Not yet done: a first deploy run on `main`, then shorten and stats from the SWA URL in a browser against the live backend.
