@@ -1,0 +1,82 @@
+<section class="card" aria-labelledby="shorten-heading">
+  <h2 id="shorten-heading">Shorten a URL</h2>
+  <form (submit)="onSubmit($event)">
+    <div class="form-group">
+      <label for="url-input">Long URL</label>
+      <input
+        id="url-input"
+        type="text"
+        name="url"
+        placeholder="https://example.com/very-long-url"
+        [value]="url()"
+        (input)="onUrlInput($event)"
+        [disabled]="loading() || retryAfterSeconds() > 0"
+        autocomplete="off"
+        required
+      />
+    </div>
+
+    @if (validationError()) {
+      <p class="error-text" role="alert">{{ validationError() }}</p>
+    }
+
+    @if (error(); as err) {
+      <div class="error-banner" role="alert">
+        <p>{{ err.message }}</p>
+        @if (err.details && err.details.length > 0) {
+          <ul>
+            @for (detail of err.details; track detail) {
+              <li>{{ detail }}</li>
+            }
+          </ul>
+        }
+      </div>
+    }
+
+    @if (retryAfterSeconds() > 0) {
+      <p class="rate-limit-warning" role="alert">
+        Rate limit exceeded. Please wait {{ retryAfterSeconds() }}s before trying again.
+      </p>
+    }
+
+    <button
+      type="submit"
+      class="primary-btn"
+      [disabled]="loading() || retryAfterSeconds() > 0"
+    >
+      @if (loading()) {
+        <span>Shortening...</span>
+      } @else {
+        <span>Shorten URL</span>
+      }
+    </button>
+  </form>
+
+  @if (createdUrl(); as result) {
+    <div class="result-box" aria-live="polite">
+      <p class="result-label">Your shortened link:</p>
+      <div class="result-row">
+        <a
+          [href]="result.shortUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="short-link"
+        >
+          {{ result.shortUrl }}
+        </a>
+        <button
+          type="button"
+          class="secondary-btn"
+          (click)="copyToClipboard(result.shortUrl)"
+          [attr.aria-label]="'Copy ' + result.shortUrl + ' to clipboard'"
+        >
+          Copy
+        </button>
+      </div>
+
+      @if (copyFeedback()) {
+        <p class="feedback-text" role="status">{{ copyFeedback() }}</p>
+      }
+    </div>
+  }
+</section>
