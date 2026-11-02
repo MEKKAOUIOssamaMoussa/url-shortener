@@ -37,6 +37,19 @@ HTTP/2 302
 location: https://example.com/some/long/path
 ```
 
+### 3. Query Click Analytics
+*(Counts are eventually consistent, lagging behind in-memory buffer flushes by up to 5 seconds, and lossy by design via at-most-once delivery. Endpoint is not rate limited and does not record clicks.)*
+```bash
+curl -si https://ca-shortener.proudmushroom-61e0888c.francecentral.azurecontainerapps.io/api/urls/<code-from-response>/stats
+```
+Example response (`200 OK`):
+```http
+HTTP/2 200
+content-type: application/json
+
+{"code":"<code-from-response>","totalClicks":42,"daily":[{"day":"2026-11-02","count":42}]}
+```
+
 ## Running Locally
 
 ### Prerequisites
@@ -120,3 +133,22 @@ curl -si -X POST http://localhost:8080/api/urls \
 ```bash
 curl -si http://localhost:8080/<code-from-response>
 ```
+
+3. Query click analytics:
+```bash
+curl -si http://localhost:8080/api/urls/<code-from-response>/stats
+```
+Example response (`200 OK`):
+```json
+{
+  "code": "<code-from-response>",
+  "totalClicks": 2,
+  "daily": [
+    {
+      "day": "2026-11-02",
+      "count": 2
+    }
+  ]
+}
+```
+*Note*: Click counts are eventually consistent (lagging behind the in-memory buffer by up to the 5s flush interval) and lossy by design (at-most-once delivery, never blocking or throwing on the redirect path). Unknown codes return RFC 9457 (formerly RFC 7807) 404 ProblemDetail.

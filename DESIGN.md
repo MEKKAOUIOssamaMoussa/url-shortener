@@ -368,3 +368,93 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   * *Non-Transactional Sequences*: PostgreSQL sequences are non-transactional: calling `nextval` immediately advances the sequence and cannot be rolled back. If an insert fails (e.g. timeout, conflict), sequence numbers are lost, leaving harmless gaps in the counter space.
   * *Latency Impact*: The `sequence` strategy requires an additional synchronous database round trip per create request (`SELECT nextval('short_code_seq')` before `INSERT`), unlike `random` which performs zero database queries before the insert.
   * *Retention of Retry Loop & Unique Constraint*: Both the unique constraint on `short_url.code` and the 3-attempt retry loop in `ShortUrlService` are retained for both strategies. If an operator switches strategies on a live database or rotates `shortener.code.secret`, sequence-generated codes can collide with previously persisted random codes.
+
+---
+
+## 16. Stage 5: Click Analytics & Background Buffer Decisions (Step A & Step B)
+
+* **Problem Statement & Architectural Tension**:
+  * A naive implementation of click tracking records every redirect by performing a synchronous `INSERT` or `UPDATE` into PostgreSQL on the HTTP request thread.
+  * In a serverless cloud environment (such as Azure Container Apps communicating with Neon PostgreSQL), every database write incurs a network round-trip ($\approx 20\text{--}50\text{ ms}$ or several seconds during Neon cold wake-up) directly on the redirect critical path.
+  * Furthermore, synchronous writes couple the availability of the redirect service to the health of the database: if PostgreSQL experiences latency spikes, connection pool starvation, or brief downtime, redirects fail or time out.
+
+* **Architectural Options & Decision Table**:
+  | Architecture | Delivery Semantics | Operational Cost & Infrastructure | Latency Impact on Redirect | Decision |
+  | :--- | :--- | :--- | :--- | :--- |
+  | **In-Process Bounded Buffer** (`ConcurrentHashMap` + background flusher) | At-most-once (buffered clicks can be lost on ungraceful crash or failed batch) | **\$0.00**. Uses existing JVM heap memory; requires zero additional cloud services or daemons on Azure Container Apps. | **Zero I/O overhead** ($O(1)$ lock-free `LongAdder.increment()` on hot path; non-blocking, never throws). | **ACCEPTED**. Default implementation for Azure and local demo. Free, self-contained, and preserves independent redirect availability. |
+  | **Redis Streams / PubSub** | At-least-once / At-most-once | Requires provisioning managed Redis in Azure (costing \$15–\$50+/month) or maintaining Redis cluster infrastructure. | Incurs network round trip to Redis ($\approx 1\text{--}2\text{ ms}$) on redirect path. | **REJECTED**. Avoids cloud hosting costs for a portfolio demo project. |
+  | **Apache Kafka / Pulsar** | At-least-once / Exactly-once (with transactional producers & consumer offset commits) | Heavy infrastructure footprint (Kafka brokers, Schema Registry, ZooKeeper/KRaft); significant compute and memory overhead. | Asynchronous producer send with local buffering, but high client library footprint. | **REJECTED**. Kafka architectural patterns were already implemented and demonstrated in a previous project; unnecessary overhead for this service. |
+
+* **Delivery Semantics: At-Most-Once vs Exactly-Once**:
+  * *Why At-Most-Once is Acceptable for Analytics*: Click metrics are aggregate, non-financial operational approximations. A business decision or traffic chart does not change if a crash drops 5 clicks out of 10,000. In exchange for at-most-once delivery, the redirect hot path receives complete isolation from database I/O, zero latency overhead, and immunity from database downtime.
+  * *What Would Change for Monetary Transactions*: If click events represented billing events or monetary charges (e.g. pay-per-click advertising), at-most-once loss would be unacceptable. A financial architecture would require:
+    1. **Transactional Outbox / Two-Phase Commit**: Storing event records atomically within the same database transaction as the business entity, or using Change Data Capture (CDC, e.g. Debezium) off the Postgres WAL.
+    2. **Idempotency Keys & Deduplication**: Unique event identifiers per transaction to prevent double counting across retries.
+    3. **Durable Distributed Log**: Publishing to Apache Kafka with `acks=all` and transactional producers, consumed by stream processors (e.g. Apache Flink) tracking consumer offsets.
+  * *Exact Loss Cases in the In-Process Design*:
+    1. **Ungraceful Termination**: Process killed abruptly without `SIGTERM` (`SIGKILL` / `kill -9`, power loss, or sudden VM termination) loses un-flushed clicks in the active in-memory buffer.
+    2. **Failed Batch Write**: If a database batch upsert fails (e.g. connection drop, database outage, or foreign key violation), the entire batch is dropped without retry to guarantee that partial retries never cause double counting.
+    3. **Atomic Swap Race**: When the flusher atomically swaps `activeMapRef`, a concurrent redirect thread that already resolved the old map reference may execute `LongAdder.increment()` after or during the flusher's drain/iteration. Because the hot path is non-blocking and lock-free, this click is recorded in the discarded map and lost.
+    4. **Capacity Bound Shedding**: When distinct active keys in memory reach `max-pending-keys` (default 10,000), attempts to allocate new keys are dropped and tallied in a drop counter to bound memory footprint.
+
+* **Backpressure & Memory Bounds**:
+  * *Bounded Pending Keys*: Bounded by `shortener.analytics.max-pending-keys` (default 10,000 distinct `(code, day)` entries).
+  * *Drop-and-Count Strategy*: Clicks on existing keys in the map always succeed. When the map size reaches the limit, new keys are rejected, and the drop count is incremented via an atomic counter (`droppedClicks`).
+  * *Summary Logging*: To prevent log saturation, rejected clicks do not log individual warnings. Instead, the background flusher emits a single summary warning per flush if any clicks were dropped: `"Dropped {} clicks since last flush"`.
+
+* **Storage Model & GDPR Privacy Compliance**:
+  * *Table Schema*:
+    ```sql
+    create table click_stats (
+        code varchar(16) not null references short_url(code),
+        day date not null,
+        count bigint not null,
+        primary key (code, day)
+    );
+    ```
+  * *Zero Personal Data*: Stores strictly `(code, day, count)`. No IP addresses, user-agent strings, cookies, or HTTP referrers are stored. Under EU GDPR (General Data Protection Regulation), IP addresses are legally classified as personal data; aggregating strictly by date and short code eliminates personal data storage and compliance burdens entirely.
+
+* **Correctness & Reliability Details**:
+  * *ScheduledExecutorService Task Suppression Prevention*: In Java's `ScheduledExecutorService`, if a periodic task throws an unchecked exception, the executor suppresses all subsequent scheduled executions silently. The flush task wraps execution in a top-level `catch (Throwable t)` block, logging a single WARN line and preserving the periodic flusher.
+  * *Single Transaction Per Batch Upsert*: `ClickStatsWriter` executes batches inside `TransactionTemplate` with `PROPAGATION_REQUIRES_NEW`. In PostgreSQL default auto-commit, statements commit individually; wrapping the batch ensures all-or-nothing atomicity.
+  * *Foreign Key Violation Handling*: If a row references a deleted or nonexistent short code, the entire batch rolls back and is dropped, preventing inconsistent partial state.
+  * *Post-Shutdown Invocation Safety*: If `record(code)` is called after `stop()` has completed, it checks `running.get()` and safely no-ops without throwing `RejectedExecutionException`.
+
+* **Snapshot Consistency for Stats Queries**:
+  * *Transactional Isolation*: `ClickStatsReader.getStats(code)` is annotated with `@Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)`.
+  * *Why READ COMMITTED is Insufficient*: PostgreSQL's default `READ COMMITTED` isolation acquires a fresh MVCC snapshot for each separate SQL statement. If a background flusher commits a batch between the total clicks query (`SELECT SUM(count) ...`) and the daily slice query (`SELECT day, count ... LIMIT 30`), `totalClicks` would diverge from the sum of the returned `daily` records. Under `REPEATABLE READ`, PostgreSQL freezes an MVCC snapshot at the start of the first query in the transaction, ensuring that `totalClicks` and `daily` rows are computed from an identical, self-consistent database state.
+  * *Proxy Enforcement*: `ClickStatsController` injects `ClickStatsReader` as a Spring-managed bean, ensuring all invocations traverse the Spring AOP transaction proxy without self-invocation bypass.
+
+* **Graceful Shutdown & Spring Lifecycle Ordering**:
+  * Spring Boot 4.1.1 manages graceful shutdown using `SmartLifecycle` beans ordered by phase.
+  * Quoted source phases:
+    * `WebServerGracefulShutdownLifecycle.SMART_LIFECYCLE_PHASE = 2147482623` (`Integer.MAX_VALUE - 1024`): Initiates web server graceful shutdown, rejecting new HTTP connections and finishing in-flight requests.
+    * `WebServerStartStopLifecycle`: Phase `2147481599` (`Integer.MAX_VALUE - 2048`): Stops the embedded Tomcat web server.
+    * `BufferedClickRecorder`: Configured with phase `2147480575` (`Integer.MAX_VALUE - 3072`): Stops accepting clicks, runs a final flush of buffered counts to PostgreSQL, and terminates its executor thread.
+    * `DataSource` closure: Occurs subsequently in `AbstractApplicationContext.destroyBeans()`, strictly after all `SmartLifecycle` beans have stopped.
+  * Because Spring's `DefaultLifecycleProcessor` stops beans in reverse phase order, the shutdown order is strictly guaranteed:
+    1. Tomcat stops accepting incoming HTTP requests ($2{,}147{,}482{,}623$).
+    2. Web server stops ($2{,}147{,}481{,}599$).
+    3. `BufferedClickRecorder` flushes remaining in-memory counts to Postgres and shuts down executor ($2{,}147{,}480{,}575$).
+    4. HikariCP connection pool is closed during bean destruction.
+  * *Shutdown Flush Verification (MEASURED)*:
+    * In `ShutdownFlushTest`, periodic flushing was disabled by setting a 1-hour interval. 3 redirects were recorded (0 rows in `click_stats`). Calling `context.close()` triggered graceful shutdown, resulting in exactly 3 rows in `click_stats` upon completion.
+    * Local SIGTERM verification: 5 initial clicks flushed; 3 additional clicks recorded and terminated via `docker compose stop` (`SIGTERM`). Verification showed count updated from 5 to 8. (Supporting observation only: periodic flush could not be completely excluded during container stop).
+
+* **Cloud Persistence Verification (MEASURED)**:
+  * *Neon Migration V3*: MEASURED 2026-11-01 13:08 UTC: Flyway migration `V3__create_click_stats.sql` applied successfully on Neon PostgreSQL during deployment.
+
+* **Redirect Latency Benchmark: Analytics Enabled vs Disabled (MEASURED)**:
+  * Tested locally on Docker Compose PostgreSQL with cache disabled (`shortener.cache.enabled=false`), 1 warm-up request followed by $n=10$ requests measuring `time_total` via curl on the same code:
+  * **a. Analytics Enabled (`BufferedClickRecorder`, defaults)**:
+    * Raw (s): `0.012903, 0.009986, 0.009516, 0.009491, 0.009588, 0.007806, 0.007983, 0.008508, 0.008026, 0.008425`
+    * Summary: Min = **7.81 ms**, Median = **9.00 ms**, Max = **12.90 ms**
+  * **b. Analytics Disabled (`NoOpClickRecorder`, `shortener.analytics.enabled=false`)**:
+    * Raw (s): `0.014568, 0.014805, 0.009021, 0.015353, 0.013383, 0.009569, 0.010231, 0.008893, 0.014847, 0.012207`
+    * Summary: Min = **8.89 ms**, Median = **12.80 ms**, Max = **15.35 ms**
+  * *Honest Interpretation*:
+    * The measured ranges completely overlap (7.81–12.90 ms enabled vs 8.89–15.35 ms disabled), reflecting normal CPU/OS scheduling jitter and local loopback TCP latency.
+    * As intended by design, `BufferedClickRecorder.record()` performs a non-blocking $O(1)$ `LongAdder.increment()` on an in-memory map without issuing network or disk I/O on the redirect thread. There is **no measurable latency degradation** introduced by enabling click analytics.
+
+* **Live Azure Restart Experiment**:
+  * **TO DO**: Verifying shutdown flush during Azure Container Apps revision restart under active load remains to be performed in a future testing window.
