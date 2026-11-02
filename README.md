@@ -54,6 +54,7 @@ content-type: application/json
 
 ### Prerequisites
 - Java 21 (Eclipse Temurin recommended)
+- Node.js `>=24.15` (defined in `frontend/.nvmrc`; run `nvm use` in `frontend/`) and npm `>=11.0`
 - Docker Desktop or Docker engine
 
 ### Start Dependencies
@@ -65,12 +66,28 @@ docker compose up -d postgres
 docker compose up -d
 ```
 
-### Option 1: Run with Maven Wrapper
+### Start Backend
 ```bash
 cd backend
 ./mvnw spring-boot:run
 ```
 Access the application health endpoint at `http://localhost:8080/actuator/health`.
+
+### Start Frontend (Angular SPA)
+In a separate terminal, with the backend running on `http://localhost:8080`:
+```bash
+cd frontend
+nvm use
+npm install
+npm start
+```
+Access the frontend in your browser at `http://localhost:4200`.
+
+To execute frontend unit tests headless:
+```bash
+cd frontend
+npm test -- --watch=false
+```
 
 ### Option 2: Run Locally with Redis Cache Enabled
 By default, the cache is disabled (`shortener.cache.enabled=false`) and uses a no-op implementation. To enable Redis caching:
