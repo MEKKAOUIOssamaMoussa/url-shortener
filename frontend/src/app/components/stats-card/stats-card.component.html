@@ -1,0 +1,75 @@
+<section class="card" aria-labelledby="stats-heading">
+  <h2 id="stats-heading">URL Analytics & Stats</h2>
+  <form (submit)="onSubmit($event)">
+    <div class="form-group">
+      <label for="stats-code-input">Short Code</label>
+      <input
+        id="stats-code-input"
+        type="text"
+        name="code"
+        placeholder="e.g. abc123"
+        [value]="code()"
+        (input)="onCodeInput($event)"
+        [disabled]="loading()"
+        maxlength="16"
+        autocomplete="off"
+        required
+      />
+    </div>
+
+    @if (validationError()) {
+      <p class="error-text" role="alert">{{ validationError() }}</p>
+    }
+
+    @if (error(); as err) {
+      <div class="error-banner" role="alert">
+        <p>{{ err.message }}</p>
+      </div>
+    }
+
+    <button type="submit" class="primary-btn" [disabled]="loading()">
+      @if (loading()) {
+        <span>Fetching stats...</span>
+      } @else {
+        <span>View Stats</span>
+      }
+    </button>
+  </form>
+
+  @if (stats(); as data) {
+    <div class="stats-result" aria-live="polite">
+      <div class="stats-summary">
+        <p class="stats-code">Stats for code: <strong>{{ data.code }}</strong></p>
+        <p class="total-clicks">
+          Total Clicks: <span class="click-number">{{ data.totalClicks }}</span>
+        </p>
+        <p class="lag-note">
+          Note: Click counts are asynchronously batched and lag by up to 5 seconds.
+        </p>
+      </div>
+
+      @if (data.totalClicks === 0 || data.daily.length === 0) {
+        <p class="no-clicks-message">No clicks recorded yet.</p>
+      } @else {
+        <div class="table-container">
+          <table class="daily-table" aria-label="Daily click counts">
+            <thead>
+              <tr>
+                <th scope="col">Date</th>
+                <th scope="col">Clicks</th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (entry of data.daily; track entry.day) {
+                <tr>
+                  <td>{{ entry.day }}</td>
+                  <td class="clicks-cell">{{ entry.count }}</td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </div>
+      }
+    </div>
+  }
+</section>

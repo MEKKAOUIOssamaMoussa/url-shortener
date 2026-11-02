@@ -482,3 +482,28 @@ A URL shortener built in small stages to learn system design, deployment, and CI
   * *Why WebMvcConfigurer is Insufficient*: `RateLimitFilter` operates in the servlet filter chain before requests reach Spring MVC's `DispatcherServlet`. When a client exceeds the rate limit, `RateLimitFilter` writes the RFC 9457 HTTP 429 ProblemDetail payload directly to the servlet response stream and short-circuits the chain. If CORS were registered via Spring MVC (`WebMvcConfigurer.addCorsMappings()`), MVC CORS interceptors would never execute on 429 rejections. The HTTP 429 response would leave without `Access-Control-Allow-Origin`, causing the browser to block the response and hide the 429 status and `Retry-After` header from the frontend SPA. Placing `CorsFilter` at the head of the servlet filter chain ensures all responses—including 429 rate-limit rejections—carry proper CORS headers and exposed headers (`Location`, `Retry-After`).
   * *Configuration*: Path `/api/**`, allowed origins from `shortener.cors.allowed-origins` (`${CORS_ALLOWED_ORIGINS:http://localhost:4200}`), methods `GET, POST, OPTIONS`, allowed headers `Content-Type`, exposed headers `Location, Retry-After`, max age 3600 s.
   * *Preflight Rate Limit Exemption*: `RateLimitFilter.shouldNotFilter()` explicitly checks `!("POST".equalsIgnoreCase(request.getMethod()) && "/api/urls".equals(request.getRequestURI()))`. HTTP `OPTIONS` preflight requests evaluate to `false` for the POST condition, bypassing the rate limiter filter entirely and consuming 0 tokens.
+  * *MEASURED (2026-11-02)*: Live from Azure Cloud Shell (single IP), 10 x 201 then 429 with `access-control-allow-origin`, `access-control-expose-headers` and `retry-after` -> `CorsFilter` runs before `RateLimitFilter` on real Tomcat behind the ingress. From the home connection, two quick runs of 25 POSTs (50 total; the second run within one minute, the first untimed) produced no 429 -> that connection likely uses at least three egress IPs (inferred, not observed directly).
+
+---
+
+## 18. Stage 7: Angular Frontend Architecture (Step A2)
+
+* **Architecture: Zoneless Standalone Components**:
+  * *Decision*: Use Angular 22 standalone components with zoneless change detection (`provideZonelessChangeDetection()`) and signals-first reactivity (`signal`, `computed`, `effect`), without `NgModule` or `@angular/router`.
+  * *Reasoning*: The frontend is a focused single-page utility with two cohesive cards (Shorten and Stats). Eliminating `zone.js` reduces initial bundle size, improves runtime performance, and aligns with modern Angular best practices. Omitting client-side routing eliminates route resolution complexity and prevents collisions with the backend's top-level redirect pattern `/{code}`.
+
+* **API Client & RFC 9457 Error Mapping**:
+  * *Decision*: Centralize API communication in `UrlApiService` and error normalization in a pure `mapHttpError` function.
+  * *Reasoning*: The Spring Boot backend adheres strictly to RFC 9457 (`application/problem+json`). `mapHttpError` provides type-safe mapping:
+    * `status === 0`: Detects network disconnections or CORS preflight failures and returns `"Cannot reach the server (network or CORS)"`.
+    * `status === 400`: Maps field-level validation errors from `errors: [{field, message}]` into distinct UI bullet items.
+    * `status === 404`: Displays resource not found details.
+    * `status === 429`: Extracts the CORS-exposed `Retry-After` header (falling back to 60 s if missing/invalid) to trigger UI cooldown countdowns.
+
+* **Cold-Start UX**:
+  * *Decision*: Display `ColdStartBannerComponent` if any API request remains in-flight after 2.5 seconds, and hide it immediately upon response completion.
+  * *Reasoning*: Azure Container Apps scales to zero when idle; cold starts can take ~30 s while the platform provisions container resources before JVM initialization. Providing clear, non-blocking feedback (*"Waking up the backend (it scales to zero; the first request can take ~30 s)"*) sets user expectations without artificial timeouts or premature failure states.
+
+* **HTTP 429 Rate-Limit Countdown**:
+  * *Decision*: When creation is rejected with HTTP 429, initiate a 1-second interval countdown from `retryAfterSeconds` that disables the shorten submission button until it reaches 0.
+  * *Reasoning*: Prevents spamming a blocked endpoint, provides visible cooldown progress to the user, and cleans up active timers upon component destruction (`DestroyRef.onDestroy`).

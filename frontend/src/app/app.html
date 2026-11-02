@@ -1,0 +1,32 @@
+<div class="app-layout">
+  <header class="app-header">
+    <div class="header-container">
+      <h1 class="app-title">URL Shortener</h1>
+      <p class="app-subtitle">Fast, minimal link shortener with click analytics</p>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <app-cold-start-banner [visible]="isColdStart()" />
+
+    <div class="cards-grid">
+      <app-shorten-card
+        (requestStarted)="onRequestStarted()"
+        (requestFinished)="onRequestFinished()"
+        (urlCreated)="onUrlCreated($event)"
+      />
+
+      <app-stats-card
+        [prefilledCode]="latestCreatedCode()"
+        (requestStarted)="onRequestStarted()"
+        (requestFinished)="onRequestFinished()"
+      />
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <div class="footer-container">
+      <p>URL Shortener &bull; Spring Boot + Angular</p>
+    </div>
+  </footer>
+</div>

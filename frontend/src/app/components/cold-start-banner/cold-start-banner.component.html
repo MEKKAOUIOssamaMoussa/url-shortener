@@ -1,0 +1,10 @@
+@if (visible()) {
+  <aside class="cold-start-banner" role="status" aria-live="polite">
+    <div class="banner-content">
+      <span class="spinner" aria-hidden="true"></span>
+      <p class="banner-message">
+        Waking up the backend (it scales to zero; the first request can take ~30 s)
+      </p>
+    </div>
+  </aside>
+}
